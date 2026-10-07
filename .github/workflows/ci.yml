@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  payments-api:
+    name: Payments API
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/payments-api/go.mod
+
+      - name: Verify vet, build, and test
+        working-directory: services/payments-api
+        run: |
+          go vet ./...
+          go build ./...
+          go test -v ./...
+
+  proto:
+    name: Protocol Buffers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install buf
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+
+      - name: Lint proto definitions
+        run: |
+          buf lint
