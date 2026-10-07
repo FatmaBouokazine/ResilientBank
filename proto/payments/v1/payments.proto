@@ -1,0 +1,73 @@
+syntax = "proto3";
+
+package payments.v1;
+
+option go_package = "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/payments/v1;paymentsv1";
+
+import "google/protobuf/timestamp.proto";
+
+// PaymentService provides operations for processing and retrieving payments.
+service PaymentService {
+  // CreatePayment initiates a payment with idempotency guarantee.
+  rpc CreatePayment(CreatePaymentRequest) returns (CreatePaymentResponse);
+
+  // GetPayment retrieves the details of an existing payment by its unique ID.
+  rpc GetPayment(GetPaymentRequest) returns (GetPaymentResponse);
+}
+
+// CreatePaymentRequest specifies the parameters required to execute a payment.
+message CreatePaymentRequest {
+  // Unique client-assigned idempotency key to prevent duplicate payments.
+  string idempotency_key = 1;
+
+  // Source account identifier.
+  string from_account = 2;
+
+  // Destination account identifier.
+  string to_account = 3;
+
+  // Transaction amount represented in minor units (e.g. cents).
+  int64 amount_cents = 4;
+
+  // ISO 4217 3-letter currency code (e.g. USD, EUR).
+  string currency = 5;
+}
+
+// CreatePaymentResponse returns the status and generated identifier for a created payment.
+message CreatePaymentResponse {
+  // Canonical UUID of the recorded payment.
+  string payment_id = 1;
+
+  // Status of the payment ingestion (e.g. ACCEPTED).
+  string status = 2;
+}
+
+// GetPaymentRequest specifies the target payment identifier for lookup.
+message GetPaymentRequest {
+  // Canonical UUID of the payment to retrieve.
+  string payment_id = 1;
+}
+
+// GetPaymentResponse contains full transaction details of a retrieved payment.
+message GetPaymentResponse {
+  // Canonical UUID of the payment.
+  string payment_id = 1;
+
+  // Status of the payment (e.g. ACCEPTED).
+  string status = 2;
+
+  // Source account identifier.
+  string from_account = 3;
+
+  // Destination account identifier.
+  string to_account = 4;
+
+  // Transaction amount in minor units (cents).
+  int64 amount_cents = 5;
+
+  // ISO 4217 3-letter currency code.
+  string currency = 6;
+
+  // Timestamp when the payment record was created.
+  google.protobuf.Timestamp created_at = 7;
+}
