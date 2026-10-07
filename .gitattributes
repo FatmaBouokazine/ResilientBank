@@ -1,0 +1,4 @@
+# Ensure shell scripts always use LF endings
+*.sh text eol=lf
+*.proto text eol=lf
+Makefile text eol=lf
