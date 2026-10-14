@@ -1,0 +1,83 @@
+syntax = "proto3";
+
+package events.v1;
+
+option go_package = "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/events/v1;eventsv1";
+
+import "google/protobuf/timestamp.proto";
+
+// PaymentEvent is the transport envelope wrapping every domain event published to Kafka.
+//
+// WHY A DEDICATED ENVELOPE:
+// Kafka records are immutable and long-lived, so every message must carry its own
+// routing and traceability metadata rather than relying on transport headers alone.
+// A producer can evolve or drop headers without breaking consumers; fields inside
+// the envelope are part of the contract and therefore covered by buf breaking checks.
+//
+// Envelope fields stay deliberately generic (no domain concepts) so that new event
+// types can be introduced without changing this message.
+message PaymentEvent {
+  // Unique identifier for this event instance. Consumers MUST use it to de-duplicate
+  // redeliveries, since at-least-once delivery means the same event can arrive twice.
+  string event_id = 1;
+
+  // Dotted, past-tense event name in the form "<aggregate>.<action>", e.g. "payment.created".
+  // Consumers route on this value.
+  string event_type = 2;
+
+  // Monotonic version of the event_type's payload schema, incremented only for
+  // backward-incompatible payload changes. Consumers MUST tolerate unknown versions
+  // by ignoring fields they do not recognise.
+  uint32 event_version = 3;
+
+  // Time the domain change occurred, as opposed to the time the event was relayed to
+  // Kafka. Consumers use this for ordering and latency analysis.
+  google.protobuf.Timestamp occurred_at = 4;
+
+  // Identifier tying this event back to the originating request. Set to the client
+  // supplied idempotency key, which makes the bridge between the gRPC request and
+  // the emitted event traceable end to end.
+  string correlation_id = 5;
+
+  // Logical entity the event describes, e.g. "payment".
+  string aggregate_type = 6;
+
+  // Identifier of the specific entity instance, e.g. the payment UUID. This is also
+  // the Kafka partition key, so all events for one aggregate stay ordered.
+  string aggregate_id = 7;
+
+  // Name of the service that produced the event, e.g. "payments-api". Allows consumers
+  // to distinguish an upstream producer from a replayed or bridged message.
+  string producer = 8;
+
+  // Event-specific body. Exactly one field is set. Numeric tags start at 100 to leave
+  // room for future envelope additions without disturbing the payload.
+  oneof payload {
+    // Emitted when a payment is durably recorded. See PaymentCreated.
+    PaymentCreated payment_created = 100;
+  }
+}
+
+// PaymentCreated describes a payment that was accepted and durably persisted.
+message PaymentCreated {
+  // Canonical UUID of the recorded payment.
+  string payment_id = 1;
+
+  // Source account debited by the payment.
+  string from_account = 2;
+
+  // Destination account credited by the payment.
+  string to_account = 3;
+
+  // Transaction amount in minor units (e.g. cents).
+  int64 amount_cents = 4;
+
+  // ISO 4217 3-letter currency code.
+  string currency = 5;
+
+  // Ingestion status at the moment the event was emitted, e.g. "ACCEPTED".
+  string status = 6;
+
+  // Time the payment record was created.
+  google.protobuf.Timestamp created_at = 7;
+}

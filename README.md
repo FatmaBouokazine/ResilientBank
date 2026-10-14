@@ -52,7 +52,7 @@ Before running the platform locally, ensure the following tooling is installed:
 - [ ] **Phase 3: High-Availability Consensus & WAL** — BadgerDB Write-Ahead Log (WAL) and Raft consensus node for local durability.
 - [ ] **Phase 4: Dual-Region Active-Active Replication** — Region B deployment, cross-region replication, conflict resolution, and split-brain mitigation.
 - [ ] **Phase 5: Observability & Distributed Tracing** — OpenTelemetry, Jaeger, Grafana dashboards, Loki log aggregation, and Pyroscope profiling.
-- [ ] **Phase 6: Real-Time ML Anomaly Detection** — FastAPI microservice running Isolation Forest & LSTM on payment streams emitting anomaly scores.
+- [ ] **Phase 6: Real-Time ML Anomaly Detection** — Django microservice running Isolation Forest & LSTM on payment streams emitting anomaly scores.
 - [ ] **Phase 7: Resilience & Chaos Engineering** — Chaos Mesh experiments (network partitions, latency injection, leader loss) with automated SLO verification.
 - [ ] **Phase 8: Security, Cryptography & Compliance** — HashiCorp Vault secrets management, Ed25519 payload signing, Merkle audit trails, and automated DORA/PCI-DSS reporting.
 - [ ] **Phase 9: Production GitOps & Policy Governance** — Terraform cloud infra, Kubernetes manifests, ArgoCD GitOps pipelines, and Open Policy Agent (OPA) gatekeepers.

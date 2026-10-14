@@ -29,13 +29,16 @@ jobs:
     name: Protocol Buffers
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
+- name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # buf breaking resolves the baseline via git, so the full history is required.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version: stable
 
       - name: Install buf
         run: |
@@ -44,3 +47,7 @@ jobs:
       - name: Lint proto definitions
         run: |
           buf lint
+
+      - name: Check for breaking proto changes
+        run: |
+          buf breaking --against ".git#branch=${{ vars.DEFAULT_BRANCH || 'main' }}"
