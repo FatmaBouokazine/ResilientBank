@@ -12,7 +12,10 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # Scripts run in lexicographic order on first container start, so the numeric
+      # filename prefix defines migration order. NOTE: these apply only to an EMPTY
+      # volume. After adding a migration run `make reset` to recreate the database.
+      - ./migrations:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U resilient -d payments"]
       interval: 5s
