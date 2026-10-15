@@ -1,0 +1,115 @@
+{
+  "title": "ResilientBank Payments",
+  "tags": ["resilientbank"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "title": "Payments by outcome",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 0, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(resilientbank_payments_total[1m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    },
+    {
+      "id": 2,
+      "title": "Payment latency p99",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 0, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(resilientbank_payment_duration_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 3,
+      "title": "Outbox backlog (events waiting)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 6, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "resilientbank_outbox_pending",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    },
+    {
+      "id": 4,
+      "title": "Oldest waiting event",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 6, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "resilientbank_outbox_oldest_pending_age_seconds",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []}
+    },
+    {
+      "id": 5,
+      "title": "Events published by outcome",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(resilientbank_outbox_published_total[1m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    },
+    {
+      "id": 6,
+      "title": "Dead-lettered events",
+      "type": "stat",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 6},
+      "targets": [
+        {
+          "expr": "sum(resilientbank_outbox_dead_letter_total)",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"value": null, "color": "green"},
+              {"value": 1, "color": "red"}
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Dependency errors",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 18, "w": 24, "h": 6},
+      "targets": [
+        {
+          "expr": "sum by (dependency) (rate(resilientbank_dependency_errors_total[1m]))",
+          "legendFormat": "{{dependency}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {"defaults": {}, "overrides": []}
+    }
+  ]
+}

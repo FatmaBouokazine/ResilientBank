@@ -1,0 +1,51 @@
+# Applies the database schema before the services start.
+#
+# Runs as a Job rather than on application startup for one reason: the payments service
+# exits if it cannot reach the schema, and a crash-loop that fixes itself on the third
+# attempt is far harder to diagnose than a Job that visibly fails. A failed migration holds
+# the rollout; a successful one is an explicit, auditable event.
+#
+# ArgoCD applies this with a sync hook so it completes before the Deployments are rolled.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: resilientbank-migrate
+  namespace: resilientbank
+  annotations:
+    # Sync waves order the rollout: wave 0 (schema) must finish before wave 1 (services).
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 3
+  # A successful apply is instantaneous; this bound exists only to stop a hung Job from
+  # blocking the sync forever.
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: resilientbank-migrate
+        app.kubernetes.io/part-of: resilientbank
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: migrate
+          image: resilientbank:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/migrate"]
+          args: ["up"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: resilientbank-config
+                  key: DATABASE_URL
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 192Mi

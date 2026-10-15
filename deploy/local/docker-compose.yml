@@ -9,10 +9,15 @@ services:
       POSTGRES_PASSWORD: resilient
       POSTGRES_DB: payments
     ports:
-      - "5432:5432"
+      # Override with POSTGRES_PORT when a local PostgreSQL already owns 5432, e.g.
+      # `make up migrate integration POSTGRES_PORT=5433`.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      # NOTE: no schema is mounted here. The schema is applied by the goose migrator
+      # (`make migrate`), which can also upgrade an existing database. Mounting SQL into
+      # docker-entrypoint-initdb.d would create a second source of truth that only ever
+      # runs on an empty volume, which is how the two would silently drift apart.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U resilient -d payments"]
       interval: 5s
@@ -33,16 +38,52 @@ services:
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      # TWO PLAINTEXT LISTENERS ARE REQUIRED.
+      #
+      # INTERNAL is what other containers on this network connect to, and EXTERNAL is what
+      # the host connects to. A single listener advertising "localhost" breaks every
+      # container-side client: from inside kafka-init, "localhost" resolves to kafka-init
+      # itself, so the broker is unreachable and topic creation fails permanently.
+      KAFKA_LISTENERS: INTERNAL://:29092,EXTERNAL://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      # Replicas must talk to each other over the internal listener.
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
-      KAFKA_NUM_PARTITIONS: 1
+      # Broker default for auto-created topics. Topics the platform depends on are created
+      # explicitly by kafka-init with the correct partition count; this only guards
+      # against an accidental topic silently defaulting to a single partition.
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:29092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 20s
+
+  # Creates the topics the outbox relayer publishes to. Runs to completion and exits.
+  # Without it, producing to a topic that does not exist fails permanently in Kafka,
+  # which is different from a broker being briefly unavailable.
+  kafka-init:
+    image: apache/kafka:4.0.0
+    container_name: rb-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./kafka/topics.sh:/scripts/topics.sh:ro
+    environment:
+      # Container-side clients must use the INTERNAL listener advertised as kafka:29092,
+      # not the host-facing localhost:9092.
+      KAFKA_BOOTSTRAP: kafka:29092
+    entrypoint: ["/bin/bash", "/scripts/topics.sh"]
+    restart: "no"
 
   prometheus:
     image: prom/prometheus:latest
@@ -53,6 +94,97 @@ services:
       - ../../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
+
+  # Grafana with provisioned datasource and dashboards. Anonymous access is enabled for
+  # local demonstration; a real deployment puts authentication in front of this.
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: rb-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ../../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+
+  # ---------------------------------------------------------------------------
+  # Application tier. These run the platform itself inside the same network, so
+  # service names resolve and no host port juggling is needed.
+  #
+  # The image is built from the repo root: `make image-build`. All three binaries ship
+  # in one image because they version together; splitting them would let the API and the
+  # relayer drift apart, which is exactly how an outbox desync happens.
+  # ---------------------------------------------------------------------------
+
+  # Applies the schema and exits. The API and relayer wait for it, so they never start
+  # against an empty database and crash-loop while migrations are pending.
+  migrate:
+    image: resilientbank:dev
+    container_name: rb-migrate
+    entrypoint: ["/usr/local/bin/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://resilient:resilient@postgres:5432/payments?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  payments-api:
+    image: resilientbank:dev
+    container_name: rb-payments-api
+    command: ["/usr/local/bin/payments-api"]
+    ports:
+      - "50051:50051"
+      - "2112:2112"
+    environment:
+      GRPC_ADDR: ":50051"
+      METRICS_ADDR: ":2112"
+      DATABASE_URL: postgres://resilient:resilient@postgres:5432/payments?sslmode=disable
+      REDIS_ADDR: redis:6379
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  outbox-relayer:
+    image: resilientbank:dev
+    container_name: rb-outbox-relayer
+    command: ["/usr/local/bin/outbox-relayer"]
+    ports:
+      - "2113:2112"
+    environment:
+      METRICS_ADDR: ":2112"
+      DATABASE_URL: postgres://resilient:resilient@postgres:5432/payments?sslmode=disable
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_ENABLED: "true"
+      OUTBOX_POLL_INTERVAL: 500ms
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+
+  dashboard:
+    image: resilientbank:dev
+    container_name: rb-dashboard
+    command: ["/usr/local/bin/dashboard"]
+    ports:
+      - "2114:2114"
+    environment:
+      DASHBOARD_ADDR: ":2114"
+      PAYMENTS_METRICS: http://payments-api:2112/metrics
+      RELAYER_METRICS: http://outbox-relayer:2112/metrics
+      PAYMENTS_GRPC: payments-api:50051
+    depends_on:
+      payments-api:
+        condition: service_started
 
 volumes:
   pgdata:

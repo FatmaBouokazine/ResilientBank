@@ -9,3 +9,9 @@ scrape_configs:
   - job_name: 'payments-api'
     static_configs:
       - targets: ['host.docker.internal:2112']
+
+  # The relayer's outbox metrics live on a separate process and port so backlog depth
+  # stays observable even when the payment API is saturated.
+  - job_name: 'outbox-relayer'
+    static_configs:
+      - targets: ['host.docker.internal:2113']

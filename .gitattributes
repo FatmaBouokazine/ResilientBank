@@ -2,3 +2,10 @@
 *.sh text eol=lf
 *.proto text eol=lf
 Makefile text eol=lf
+
+# Generated protobuf stubs must stay LF so regenerating on Windows produces no diff
+*.pb.go text eol=lf
+
+# SQL is bind-mounted into the Postgres container; CRLF is not portable across the
+# Windows/Linux boundary and can corrupt script parsing.
+*.sql text eol=lf

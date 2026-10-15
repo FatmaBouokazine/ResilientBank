@@ -19,6 +19,7 @@ import (
 	paymentsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/payments/v1"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/config"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/metrics"
+	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/outbox"
 )
 
 // IdempotencyRecord represents the serialized payload cached in Redis.
@@ -100,7 +101,18 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 		metrics.DependencyErrorsTotal.WithLabelValues("redis").Inc()
 	}
 
-	// 4. Insert into PostgreSQL with per-request DB_TIMEOUT
+	// 4. Persist the payment and its outbox event atomically
+	//
+	// WHY A TRANSACTION (see ADR 0002):
+	// A committed payment must never lack its event, and an event must never describe a
+	// payment that does not exist. Both rows are written in one transaction so the two
+	// can never diverge, no matter where the process dies.
+	//
+	// WHY READ COMMITTED (the default, deliberately not escalated):
+	// Concurrent requests sharing an idempotency key are already serialized by the
+	// UNIQUE index on idempotency_key. SERIALIZABLE would only add serialization
+	// failures that must be retried, which is the worst possible response to the client
+	// retry storms the idempotency layer exists to absorb.
 	dbCtx, cancel := context.WithTimeout(ctx, s.cfg.DBTimeout)
 	defer cancel()
 
@@ -109,12 +121,32 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 		INSERT INTO payments (id, idempotency_key, request_hash, from_account, to_account, amount_cents, currency, status, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
 		ON CONFLICT (idempotency_key) DO NOTHING
+		RETURNING created_at
 	`
 
-	tag, err := s.db.Exec(dbCtx, insertQuery,
-		newID, req.IdempotencyKey, requestHash, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency, "ACCEPTED",
-	)
+	tx, err := s.db.Begin(dbCtx)
 	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to begin transaction",
+			"idempotency_key", req.IdempotencyKey,
+			"error", err,
+		)
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return nil, status.Error(codes.Unavailable, "database unavailable")
+	}
+	// No-op once the transaction has been committed or rolled back, so this is a safe
+	// catch-all for every early return below.
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	// created_at is returned by the database rather than read from the Go clock, so the
+	// event's occurred_at and the payment row it describes can never disagree.
+	var createdAt time.Time
+	err = tx.QueryRow(dbCtx, insertQuery,
+		newID, req.IdempotencyKey, requestHash, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency, "ACCEPTED",
+	).Scan(&createdAt)
+
+	isNewPayment := err == nil
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		s.logger.ErrorContext(ctx, "postgres insert failed",
 			"idempotency_key", req.IdempotencyKey,
 			"error", err,
@@ -125,15 +157,65 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	}
 
 	var finalPaymentID string
-	if tag.RowsAffected() == 1 {
-		// Freshly created payment
+	if isNewPayment {
+		// 5. Stage the event for publication, inside the same transaction.
+		//
+		// THIS MUST NOT HAPPEN ON THE DUPLICATE PATH. ErrNoRows means the payment already
+		// exists and the request was a retry. Emitting an event here would make every
+		// client retry produce an additional payment.created, and consumers would then
+		// reconcile transfers that never occurred.
+		ref := outbox.PaymentRef{
+			PaymentID:     newID,
+			FromAccount:   req.FromAccount,
+			ToAccount:     req.ToAccount,
+			AmountCents:   req.AmountCents,
+			Currency:      req.Currency,
+			Status:        "ACCEPTED",
+			CorrelationID: req.IdempotencyKey,
+			CreatedAt:     createdAt,
+		}
+		event := outbox.BuildPaymentCreated(ref, outbox.NewEventID())
+
+		// Serialization runs inside the transaction on purpose: if the event cannot be
+		// encoded we must roll back rather than commit a payment nobody can ever be told
+		// about. Failing closed is the only correct behaviour here.
+		payload, marshalErr := outbox.Marshal(event)
+		if marshalErr != nil {
+			s.logger.ErrorContext(ctx, "failed to serialize payment event; rolling back payment",
+				"idempotency_key", req.IdempotencyKey,
+				"error", marshalErr,
+			)
+			metrics.PaymentsTotal.WithLabelValues("error").Inc()
+			return nil, status.Error(codes.Internal, "failed to serialize payment event")
+		}
+
+		outboxInsert := `
+			INSERT INTO outbox (id, aggregate_type, aggregate_id, event_type, event_version, payload, status, attempts, next_attempt_at, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, 'PENDING', 0, now(), now())
+		`
+		if _, outboxErr := tx.Exec(dbCtx, outboxInsert,
+			uuid.New().String(), outbox.AggregateTypePayment, newID,
+			outbox.EventTypePaymentCreated, outbox.EventVersionPaymentCreated, payload,
+		); outboxErr != nil {
+			// The deferred rollback discards the payment row too. A payment without its
+			// event is unrecoverable, so neither is allowed to exist alone.
+			s.logger.ErrorContext(ctx, "outbox insert failed; rolling back payment",
+				"idempotency_key", req.IdempotencyKey,
+				"error", outboxErr,
+			)
+			metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+			metrics.PaymentsTotal.WithLabelValues("error").Inc()
+			return nil, status.Error(codes.Unavailable, "database unavailable")
+		}
+
 		finalPaymentID = newID
 		metrics.PaymentsTotal.WithLabelValues("created").Inc()
 	} else {
-		// 0 rows affected: conflict on idempotency_key, inspect stored record
+		// Conflict on idempotency_key. Read the existing record on the same transaction
+		// so the hash compared is provably the one that caused the conflict.
 		selectQuery := `SELECT id, request_hash FROM payments WHERE idempotency_key = $1`
 		var existingID, existingHash string
-		if queryErr := s.db.QueryRow(dbCtx, selectQuery, req.IdempotencyKey).Scan(&existingID, &existingHash); queryErr != nil {
+		if queryErr := tx.QueryRow(dbCtx, selectQuery, req.IdempotencyKey).Scan(&existingID, &existingHash); queryErr != nil {
 			s.logger.ErrorContext(ctx, "postgres existing record query failed",
 				"idempotency_key", req.IdempotencyKey,
 				"error", queryErr,
@@ -143,18 +225,27 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 			return nil, status.Error(codes.Unavailable, "database unavailable")
 		}
 
-		if existingHash == requestHash {
-			// Matching parameters: duplicate
-			finalPaymentID = existingID
-			metrics.PaymentsTotal.WithLabelValues("duplicate").Inc()
-		} else {
-			// Different parameters: conflict
+		if existingHash != requestHash {
+			// Different parameters under a reused key. Roll back; nothing was written.
 			metrics.PaymentsTotal.WithLabelValues("conflict").Inc()
 			return nil, status.Error(codes.AlreadyExists, "idempotency key reused with different parameters")
 		}
+
+		finalPaymentID = existingID
+		metrics.PaymentsTotal.WithLabelValues("duplicate").Inc()
 	}
 
-	// 5. Write-through cache to Redis
+	if commitErr := tx.Commit(dbCtx); commitErr != nil {
+		s.logger.ErrorContext(ctx, "transaction commit failed",
+			"idempotency_key", req.IdempotencyKey,
+			"error", commitErr,
+		)
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return nil, status.Error(codes.Unavailable, "database unavailable")
+	}
+
+	// 6. Write-through cache to Redis
 	recordBytes, err := json.Marshal(IdempotencyRecord{
 		PaymentID:   finalPaymentID,
 		RequestHash: requestHash,

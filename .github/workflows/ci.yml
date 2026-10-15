@@ -1,13 +1,19 @@
 name: CI
 
+# The repository's default branch is feat/phase1-payments-api, not main. Override by
+# setting a DEFAULT_BRANCH repository variable when the default branch is renamed, so
+# these references do not have to be edited in lockstep with the branch name.
+env:
+  DEFAULT_BRANCH: ${{ vars.DEFAULT_BRANCH || 'feat/phase1-payments-api' }}
+
 on:
   push:
-    branches: [main]
+    branches: ["${{ vars.DEFAULT_BRANCH || 'feat/phase1-payments-api' }}"]
   pull_request:
 
 jobs:
   payments-api:
-    name: Payments API
+    name: Payments API (unit)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -18,15 +24,90 @@ jobs:
         with:
           go-version-file: services/payments-api/go.mod
 
-      - name: Verify vet, build, and test
+      # The committed toolchain pins are the contract for generated code. Verifying them
+      # here means a wrong local install is caught before it can produce a diff.
+      - name: Verify pinned toolchain
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
+      - name: Verify vet and build
         working-directory: services/payments-api
         run: |
           go vet ./...
           go build ./...
-          go test -v ./...
 
-  proto:
-    name: Protocol Buffers
+      - name: Run unit tests
+        working-directory: services/payments-api
+        run: go test -v -race ./...
+
+  payments-api-integration:
+    name: Payments API (atomicity)
+    runs-on: ubuntu-latest
+
+    # The outbox guarantees that a payment and its event commit or roll back together.
+    # That behaviour lives in the database's transaction log and cannot be verified by
+    # unit tests or by a fake, so it is proven here against a real PostgreSQL.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: resilient
+          POSTGRES_PASSWORD: resilient
+          POSTGRES_DB: payments
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U resilient -d payments"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/payments-api/go.mod
+
+# The migrator is the single source of truth for the schema. CI applies it the
+      # same way a developer does, so a migration that works locally cannot skip CI.
+      - name: Apply database migrations
+        working-directory: services/payments-api
+        env:
+          DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: go run ./cmd/migrate up
+
+      - name: Assert no migrations left pending
+        working-directory: services/payments-api
+        run: |
+          # goose writes its logger output to stderr, so 2>&1 is required. Without it
+          # this captures nothing, the grep never matches, and the check silently
+          # passes on an unapplied migration.
+          status="$(go run ./cmd/migrate status 2>&1)"
+          echo "$status"
+          # `migrate status` prints a "Pending" row per unapplied migration; the
+          # column header reads "Applied At" when everything is applied.
+          if echo "$status" | grep -q "Pending"; then
+            echo "::error::migrations are still pending after 'migrate up'"
+            exit 1
+          fi
+
+      - name: Run atomicity integration tests
+        working-directory: services/payments-api
+        env:
+          TEST_DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: go test -v -race -tags=integration ./...
+
+  # The SLO verifier only matters if it actually runs. This job brings up the same stack a
+  # developer uses, commits traffic through it, faults Kafka mid-relay, and fails the build
+  # if any invariant breaks or the system does not recover. Exit code 1 means a genuine
+  # resilience defect, not a flaky test.
+  chaos:
+    name: Chaos SLO verification
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -35,12 +116,81 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version-file: services/payments-api/go.mod
+
+      - name: Install grpcurl for driving traffic
+        run: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+      - name: Start postgres and kafka
+        run: docker compose -f deploy/local/docker-compose.yml up -d postgres kafka kafka-init
+
+      - name: Apply database migrations
+        working-directory: services/payments-api
+        env:
+          DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: go run ./cmd/migrate up
+
+      - name: Run kafka-kill experiment with live traffic
+        working-directory: services/payments-api
+        env:
+          DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: |
+          # Traffic must be committed DURING the fault. An empty outbox makes killing Kafka
+          # unobservable, and the experiment would pass while proving nothing.
+          go run ./cmd/payments-api &
+          API_PID=$!
+          sleep 8
+          go run ./cmd/chaos run kafka-kill --duration 15s &
+          CHAOS_PID=$!
+          sleep 5
+          for i in $(seq 1 8); do
+            grpcurl -plaintext -d "{\"idempotency_key\":\"ci-chaos-$i\",\"from_account\":\"acc-x\",\"to_account\":\"acc-y\",\"amount_cents\":1000,\"currency\":\"EUR\"}" \
+              localhost:50051 payments.v1.PaymentService/CreatePayment >/dev/null 2>&1 || true
+            sleep 1
+          done
+          wait $CHAOS_PID
+          kill $API_PID 2>/dev/null || true
+
+  proto:
+    name: Protocol Buffers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # buf breaking resolves the baseline through git, so full history is required.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: stable
 
       - name: Install buf
-        run: |
-          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+        run: go install github.com/bufbuild/buf/cmd/buf@v1.50.0
 
       - name: Lint proto definitions
-        run: |
-          buf lint
+        run: buf lint
+
+      # NOTE: this only detects breaking changes to protos that already exist on the
+      # baseline branch. A brand new file cannot be breaking, so a package introduced by
+      # a feature branch is not protected by this gate until it is merged. Once
+      # events.v1 lands on the default branch this check becomes meaningful for it.
+      - name: Check for breaking proto changes
+        run: buf breaking --against ".git#branch=${{ vars.DEFAULT_BRANCH || 'feat/phase1-payments-api' }}"
+
+  tlc:
+    name: Formal Verification Gate (TLA+ / TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Run TLC Raft consensus model checker
+        run: bash scripts/run-tlc.sh
