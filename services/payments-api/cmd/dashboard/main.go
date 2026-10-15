@@ -198,48 +198,31 @@ func pageStatus(s status) string {
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="3">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ResilientBank ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Live Status</title>
+<title>ResilientBank - Live Status</title>
 <style>
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; background: #fafafa; }
-  h1 { font-size: 1.6em; margin-bottom: 0.2em; }
-  .sub { color: #666; margin-bottom: 1.5em; }
-  .banner { padding: 1em 1.2em; border-radius: 8px; margin-bottom: 1.5em; font-size: 1.1em; }
-  .banner.ok { background: #e6f4ea; border: 1px solid #34a853; }
-  .banner.warn { background: #fef7e0; border: 1px solid #f9ab00; }
-  .banner.down { background: #fce8e6; border: 1px solid #d93025; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 1em; }
-  .card { background: white; border: 1px solid #ddd; border-radius: 8px; padding: 1em 1.2em; }
-  .card .num { font-size: 2em; font-weight: 700; }
-  .card .lbl { color: #555; margin-top: 0.3em; }
-  .row { display: flex; align-items: center; gap: 0.5em; margin: 0.6em 0; }
-  .dot { width: 12px; height: 12px; border-radius: 50%%; display: inline-block; }
-  .dot.ok { background: #34a853; }
-  .dot.down { background: #d93025; }
-  .foot { color: #888; font-size: 0.85em; margin-top: 2em; }
-  /* Stripe-style checkout */
-  .co-wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 1.2em; margin-top: 0.5em; }
-  @media (max-width: 640px) { .co-wrap { grid-template-columns: 1fr; } }
-  .co-form { background: white; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; box-shadow: 0 2px 8px rgba(60,66,87,0.08); }
-  .co-title { font-size: 1.25em; font-weight: 600; color: #32325d; margin-bottom: 1em; }
-  .co-label { display: block; font-size: 0.85em; font-weight: 500; color: #424770; margin-bottom: 0.6em; }
-  .co-input { display: block; width: 100%%; box-sizing: border-box; padding: 0.65em 0.75em; font-size: 1em; color: #32325d; background: white; border: 1px solid #e3e8ee; border-radius: 6px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
-  .co-input:focus { border-color: #635bff; box-shadow: 0 0 0 3px rgba(99,91,255,0.15); }
-  .co-input::placeholder { color: #a3acb9; }
-  .co-box { border: 1px solid #e3e8ee; border-radius: 6px; overflow: hidden; margin-bottom: 0.6em; }
-  .co-box .co-input { border: none; border-radius: 0; }
-  .co-box .co-top { border-bottom: 1px solid #e3e8ee; }
-  .co-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7em; }
-  .co-pay { width: 100%%; margin-top: 1em; padding: 0.75em; font-size: 1.05em; font-weight: 600; color: white; background: #635bff; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
-  .co-pay:hover { background: #4f46e5; }
-  .co-secure { margin-top: 0.9em; font-size: 0.8em; color: #8792a2; text-align: center; }
-  .co-summary { background: #f6f9fc; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; align-self: start; }
-  .co-sum-title { font-weight: 600; color: #32325d; margin-bottom: 1em; }
-  .co-line { display: flex; justify-content: space-between; color: #525f7f; margin-bottom: 0.6em; }
-  .co-total { display: flex; justify-content: space-between; font-weight: 700; color: #32325d; border-top: 1px solid #e3e8ee; padding-top: 0.8em; margin-top: 0.8em; }
+  body { font-family: "PwC Helvetica Neue", Arial, sans-serif; max-width: 720px; margin: 0 auto; padding: 64px 24px; color: #000000; background: #FFFFFF; }
+  a { color: #000000; font-weight: 700; }
+  .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 10px; }
+  h1 { font-size: 32px; font-weight: 700; line-height: 38px; margin: 0 0 10px 0; }
+  .sub { font-size: 18px; line-height: 30px; margin-bottom: 30px; }
+  .banner { padding: 16px; border-radius: 8px; margin-bottom: 30px; font-size: 16px; }
+  .banner.ok { background: #FFFFFF; border: 1px solid #000000; }
+  .banner.warn { background: #FFFFFF; border: 1px solid #FD5108; }
+  .banner.down { background: #FFFFFF; border: 1px solid #D93954; color: #D93954; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+  .card { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px; padding: 16px; }
+  .card .num { font-size: 32px; font-weight: 700; line-height: 38px; }
+  .card .lbl { font-size: 14px; line-height: 22px; margin-top: 10px; }
+  .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; font-size: 16px; }
+  .dot { width: 12px; height: 12px; border-radius: 9999px; display: inline-block; }
+  .dot.ok { background: #000000; }
+  .dot.down { background: #D93954; }
+  .foot { font-size: 14px; line-height: 22px; margin-top: 64px; border-top: 1px solid #E5E7EB; padding-top: 20px; }
 </style>
 </head>
 <body>
-<h1>ResilientBank ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Live Status</h1>
+<div class="eyebrow">ResilientBank / Live Status</div>
+<h1>Live Status</h1>
 <div class="sub">Refreshes every 3 seconds. Plain words, live numbers. <a href="/checkout">Send a payment</a></div>
 <div class="banner %s">%s</div>
 <div class="grid">
@@ -273,48 +256,55 @@ func pageStatus(s status) string {
 // Separated from the status page so a demonstration can open one screen for "send money"
 // and another for "watch what happens". Both read the same backend; neither duplicates
 // payment logic.
+// pageCheckout renders the payment page in the PwC Clear Editorial system:
+// white surfaces, black editorial type, square inputs, and a single vivid orange
+// action. The backend fields are unchanged; only the presentation follows the tokens.
 func pageCheckout(payHTML string) string {
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ResilientBank Ã¢â‚¬â€ Checkout</title>
+<title>ResilientBank - Checkout</title>
 <style>
-  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; background: #fafafa; }
-  a { color: #635bff; }
-  .banner { padding: 1em 1.2em; border-radius: 8px; margin-bottom: 1.5em; font-size: 1.1em; }
-  .banner.ok { background: #e6f4ea; border: 1px solid #34a853; }
-  .banner.down { background: #fce8e6; border: 1px solid #d93025; }
-  .co-wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 1.2em; margin-top: 0.5em; }
+  body { font-family: "PwC Helvetica Neue", Arial, sans-serif; max-width: 720px; margin: 0 auto; padding: 64px 24px; color: #000000; background: #FFFFFF; }
+  a { color: #000000; font-weight: 700; }
+  .eyebrow { font-size: 12px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: #000000; margin-bottom: 10px; }
+  h1 { font-size: 32px; font-weight: 700; line-height: 38px; margin: 0 0 10px 0; }
+  .lede { font-size: 18px; line-height: 30px; color: #000000; margin-bottom: 30px; }
+  .banner { padding: 16px; margin-bottom: 30px; font-size: 16px; border-radius: 8px; }
+  .banner.ok { background: #FFFFFF; border: 1px solid #000000; }
+  .banner.down { background: #FFFFFF; border: 1px solid #D93954; color: #D93954; }
+  .co-wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 24px; }
   @media (max-width: 640px) { .co-wrap { grid-template-columns: 1fr; } }
-  .co-form { background: white; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; box-shadow: 0 2px 8px rgba(60,66,87,0.08); }
-  .co-title { font-size: 1.25em; font-weight: 600; color: #32325d; margin-bottom: 1em; }
-  .co-label { display: block; font-size: 0.85em; font-weight: 500; color: #424770; margin-bottom: 0.6em; }
-  .co-input { display: block; width: 100%%; box-sizing: border-box; padding: 0.65em 0.75em; font-size: 1em; color: #32325d; background: white; border: 1px solid #e3e8ee; border-radius: 6px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
-  .co-input:focus { border-color: #635bff; box-shadow: 0 0 0 3px rgba(99,91,255,0.15); }
-  .co-input::placeholder { color: #a3acb9; }
-  .co-box { border: 1px solid #e3e8ee; border-radius: 6px; overflow: hidden; margin-bottom: 0.6em; }
-  .co-box .co-input { border: none; border-radius: 0; }
-  .co-box .co-top { border-bottom: 1px solid #e3e8ee; }
-  .co-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7em; }
-  .co-pay { width: 100%%; margin-top: 1em; padding: 0.75em; font-size: 1.05em; font-weight: 600; color: white; background: #635bff; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
-  .co-pay:hover { background: #4f46e5; }
-  .co-secure { margin-top: 0.9em; font-size: 0.8em; color: #8792a2; text-align: center; }
-  .co-summary { background: #f6f9fc; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; align-self: start; }
-  .co-sum-title { font-weight: 600; color: #32325d; margin-bottom: 1em; }
-  .co-line { display: flex; justify-content: space-between; color: #525f7f; margin-bottom: 0.6em; }
-  .co-total { display: flex; justify-content: space-between; font-weight: 700; color: #32325d; border-top: 1px solid #e3e8ee; padding-top: 0.8em; margin-top: 0.8em; }
-  .foot { color: #888; font-size: 0.85em; margin-top: 2em; }
+  .co-form { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px; padding: 30px; }
+  .co-title { font-size: 23px; font-weight: 700; line-height: 32px; margin-bottom: 20px; }
+  .co-label { display: block; font-size: 14px; font-weight: 700; line-height: 20px; margin-bottom: 20px; }
+  .co-input { display: block; width: 100%%; box-sizing: border-box; padding: 13px 16px; font-size: 16px; line-height: 27px; color: #000000; background: #FFFFFF; border: 1px solid #000000; border-radius: 0; outline: none; }
+  .co-input:focus { border-color: #FD5108; }
+  .co-input::placeholder { color: #6b7280; }
+  .co-box { border: 1px solid #000000; margin-bottom: 20px; }
+  .co-box .co-input { border: none; }
+  .co-box .co-top { border-bottom: 1px solid #E5E7EB; }
+  .co-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+  .co-pay { width: 100%%; height: 52px; margin-top: 10px; padding: 13px 20px; font-size: 16px; font-weight: 700; line-height: 24px; color: #000000; background: #FD5108; border: none; border-radius: 0; cursor: pointer; }
+  .co-pay:hover { background: #000000; color: #FFFFFF; }
+  .co-secure { margin-top: 20px; font-size: 14px; line-height: 22px; color: #000000; text-align: center; }
+  .co-summary { background: #FFFFFF; border: 1px solid #E5E7EB; border-radius: 8px; padding: 30px; align-self: start; }
+  .co-sum-title { font-size: 19px; font-weight: 600; line-height: 23px; margin-bottom: 20px; }
+  .co-line { display: flex; justify-content: space-between; font-size: 16px; line-height: 27px; margin-bottom: 10px; }
+  .co-total { display: flex; justify-content: space-between; font-size: 19px; font-weight: 600; border-top: 1px solid #E5E7EB; padding-top: 20px; margin-top: 20px; }
+  .foot { font-size: 14px; line-height: 22px; margin-top: 64px; border-top: 1px solid #E5E7EB; padding-top: 20px; }
 </style>
 </head>
 <body>
-<h1>ResilientBank Ã¢â‚¬â€ Checkout</h1>
-<div class="sub"><a href="/">Back to live status</a></div>
+<div class="eyebrow">ResilientBank / Checkout</div>
+<h1>Send a payment</h1>
+<p class="lede">Recorded atomically. Duplicate references return the original payment, never a second charge.</p>
 %s
 <div class="co-wrap">
   <form method="POST" action="/pay" class="co-form" id="payform">
-    <div class="co-title">Pay with ResilientBank</div>
+    <div class="co-title">Payment details</div>
     <label class="co-label">Email
       <input class="co-input" name="email" type="email" value="alice@example.com" required autocomplete="email">
     </label>
@@ -332,22 +322,21 @@ func pageCheckout(payHTML string) string {
       </label>
     </div>
     <button type="submit" class="co-pay" id="payBtn">Pay</button>
-    <div class="co-secure">Ã°Å¸â€â€™ Payments are recorded atomically. Duplicate references return the original payment, never a second charge.</div>
+    <div class="co-secure">Duplicate references return the original payment, never a second charge.</div>
   </form>
   <div class="co-summary">
     <div class="co-sum-title">Order summary</div>
-    <div class="co-line"><span>Transfer</span><span id="sumAmount">Ã¢â€šÂ¬50.00</span></div>
-    <div class="co-line"><span>Fee</span><span>Ã¢â€šÂ¬0.00</span></div>
-    <div class="co-total"><span>Total due</span><span id="sumTotal">Ã¢â€šÂ¬50.00</span></div>
+    <div class="co-line"><span>Transfer</span><span id="sumAmount">50.00 EUR</span></div>
+    <div class="co-line"><span>Fee</span><span>0.00 EUR</span></div>
+    <div class="co-total"><span>Total due</span><span id="sumTotal">50.00 EUR</span></div>
   </div>
 </div>
 <script>
 (function(){
   var a=document.getElementById('amountInput'), c=document.getElementById('currencyInput'),
       sa=document.getElementById('sumAmount'), st=document.getElementById('sumTotal'), b=document.getElementById('payBtn');
-  var sym={EUR:'\u20AC',USD:'$',GBP:'\u00A3'};
-  function fmt(){ var v=parseInt(a.value||'0',10)/100, s=sym[(c.value||'').toUpperCase()]||((c.value||'').toUpperCase()+' ');
-    var t=s+v.toFixed(2); sa.textContent=t; st.textContent=t; b.textContent='Pay '+t; }
+  function fmt(){ var v=(parseInt(a.value||'0',10)/100).toFixed(2), cur=(c.value||'').toUpperCase();
+    var t=v+' '+cur; sa.textContent=t; st.textContent=t; b.textContent='Pay '+t; }
   a.addEventListener('input',fmt); c.addEventListener('input',fmt); fmt();
 })();
 </script>

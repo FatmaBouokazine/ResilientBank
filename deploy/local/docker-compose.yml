@@ -113,5 +113,78 @@ services:
     depends_on:
       - prometheus
 
+  # ---------------------------------------------------------------------------
+  # Application tier. These run the platform itself inside the same network, so
+  # service names resolve and no host port juggling is needed.
+  #
+  # The image is built from the repo root: `make image-build`. All three binaries ship
+  # in one image because they version together; splitting them would let the API and the
+  # relayer drift apart, which is exactly how an outbox desync happens.
+  # ---------------------------------------------------------------------------
+
+  # Applies the schema and exits. The API and relayer wait for it, so they never start
+  # against an empty database and crash-loop while migrations are pending.
+  migrate:
+    image: resilientbank:dev
+    container_name: rb-migrate
+    entrypoint: ["/usr/local/bin/migrate", "up"]
+    environment:
+      DATABASE_URL: postgres://resilient:resilient@postgres:5432/payments?sslmode=disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  payments-api:
+    image: resilientbank:dev
+    container_name: rb-payments-api
+    command: ["/usr/local/bin/payments-api"]
+    ports:
+      - "50051:50051"
+      - "2112:2112"
+    environment:
+      GRPC_ADDR: ":50051"
+      METRICS_ADDR: ":2112"
+      DATABASE_URL: postgres://resilient:resilient@postgres:5432/payments?sslmode=disable
+      REDIS_ADDR: redis:6379
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+
+  outbox-relayer:
+    image: resilientbank:dev
+    container_name: rb-outbox-relayer
+    command: ["/usr/local/bin/outbox-relayer"]
+    ports:
+      - "2113:2112"
+    environment:
+      METRICS_ADDR: ":2112"
+      DATABASE_URL: postgres://resilient:resilient@postgres:5432/payments?sslmode=disable
+      KAFKA_BROKERS: kafka:29092
+      KAFKA_ENABLED: "true"
+      OUTBOX_POLL_INTERVAL: 500ms
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      kafka-init:
+        condition: service_completed_successfully
+
+  dashboard:
+    image: resilientbank:dev
+    container_name: rb-dashboard
+    command: ["/usr/local/bin/dashboard"]
+    ports:
+      - "2114:2114"
+    environment:
+      DASHBOARD_ADDR: ":2114"
+      PAYMENTS_METRICS: http://payments-api:2112/metrics
+      RELAYER_METRICS: http://outbox-relayer:2112/metrics
+      PAYMENTS_GRPC: payments-api:50051
+    depends_on:
+      payments-api:
+        condition: service_started
+
 volumes:
   pgdata:

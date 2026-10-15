@@ -1,4 +1,4 @@
-.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up
+.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -121,3 +121,11 @@ integration:
 
 smoke:
 	$(BASH) scripts/smoke-test.sh
+
+# Builds everything and starts the whole stack in Docker: infra, schema, application,
+# dashboards. This is the one command for "show me the system working".
+up-all:
+	$(BASH) scripts/docker-up.sh
+
+up-fresh:
+	$(BASH) scripts/docker-up.sh --fresh
