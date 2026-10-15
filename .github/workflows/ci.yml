@@ -178,3 +178,19 @@ jobs:
       # events.v1 lands on the default branch this check becomes meaningful for it.
       - name: Check for breaking proto changes
         run: buf breaking --against ".git#branch=${{ vars.DEFAULT_BRANCH || 'feat/phase1-payments-api' }}"
+
+  tlc:
+    name: Formal Verification Gate (TLA+ / TLC)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Run TLC Raft consensus model checker
+        run: bash scripts/run-tlc.sh
