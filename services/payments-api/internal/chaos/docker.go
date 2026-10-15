@@ -64,12 +64,47 @@ func (d *DockerInjector) Inject(ctx context.Context, exp Experiment) error {
 		return d.run(ctx, "network", "disconnect", d.composeProject+"_default", exp.Subject)
 
 	case FaultLatency:
-		return fmt.Errorf("latency injection into %q is not supported by the docker backend; "+
-			"use the kubernetes backend (Chaos Mesh) or inject latency with `tc` in a privileged container", exp.Subject)
+		return d.injectLatency(ctx, exp)
 
 	default:
 		return fmt.Errorf("unsupported fault kind %q", exp.Kind)
 	}
+}
+
+// injectLatency delays the subject's traffic with pumba rather than severing it.
+//
+// WHY PUMBA INSTEAD OF RAW tc:
+// Applying tc rules needs NET_ADMIN inside the target and a shell to run them in. The
+// platform's images are distroless, so neither exists. Pumba runs as a privileged
+// sidecar with its own iproute2 image and programs the target's network namespace from
+// outside, which works regardless of what the target contains.
+func (d *DockerInjector) injectLatency(ctx context.Context, exp Experiment) error {
+	// Pumba's duration governs how long the delay lasts once applied. Pass the
+	// experiment's own duration so the fault window and the tool agree.
+	args := []string{
+		"run", "--rm",
+		"-v", "/var/run/docker.sock:/var/run/docker.sock",
+		"gaiaadm/pumba",
+		"netem",
+		"--duration", formatSeconds(exp.Duration),
+		"--tc-image", "gaiadocker/iproute2",
+		"delay", "--time", fmt.Sprintf("%d", int(defaultLatencyDelay.Milliseconds())),
+		exp.Subject,
+	}
+	return d.run(ctx, args...)
+}
+
+// defaultLatencyDelay is the added round-trip latency. Two seconds exceeds every timeout
+// in the stack (DB 2s, Redis 200ms, publish 10s is the exception) so the fault is
+// observable, but short enough that recovery converges quickly.
+const defaultLatencyDelay = 2 * time.Second
+
+// formatSeconds renders a duration for tools that take whole seconds.
+func formatSeconds(d time.Duration) string {
+	if d <= 0 {
+		return "1s"
+	}
+	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
 // Recover reverses the fault.
@@ -88,6 +123,12 @@ func (d *DockerInjector) Recover(ctx context.Context, exp Experiment) error {
 			}
 			return err
 		}
+		return nil
+
+	case FaultLatency:
+		// Pumba governs its own lifetime: once started it applies tc for its own duration and
+		// then exits, so there is no separate "un-apply" step. Recovery is therefore "wait for
+		// pumba to finish", and the runner's duration already spans it.
 		return nil
 
 	default:

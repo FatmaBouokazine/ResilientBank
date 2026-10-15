@@ -102,6 +102,55 @@ jobs:
           TEST_DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
         run: go test -v -race -tags=integration ./...
 
+  # The SLO verifier only matters if it actually runs. This job brings up the same stack a
+  # developer uses, commits traffic through it, faults Kafka mid-relay, and fails the build
+  # if any invariant breaks or the system does not recover. Exit code 1 means a genuine
+  # resilience defect, not a flaky test.
+  chaos:
+    name: Chaos SLO verification
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: services/payments-api/go.mod
+
+      - name: Install grpcurl for driving traffic
+        run: go install github.com/fullstorydev/grpcurl/cmd/grpcurl@latest
+
+      - name: Start postgres and kafka
+        run: docker compose -f deploy/local/docker-compose.yml up -d postgres kafka kafka-init
+
+      - name: Apply database migrations
+        working-directory: services/payments-api
+        env:
+          DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: go run ./cmd/migrate up
+
+      - name: Run kafka-kill experiment with live traffic
+        working-directory: services/payments-api
+        env:
+          DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: |
+          # Traffic must be committed DURING the fault. An empty outbox makes killing Kafka
+          # unobservable, and the experiment would pass while proving nothing.
+          go run ./cmd/payments-api &
+          API_PID=$!
+          sleep 8
+          go run ./cmd/chaos run kafka-kill --duration 15s &
+          CHAOS_PID=$!
+          sleep 5
+          for i in $(seq 1 8); do
+            grpcurl -plaintext -d "{\"idempotency_key\":\"ci-chaos-$i\",\"from_account\":\"acc-x\",\"to_account\":\"acc-y\",\"amount_cents\":1000,\"currency\":\"EUR\"}" \
+              localhost:50051 payments.v1.PaymentService/CreatePayment >/dev/null 2>&1 || true
+            sleep 1
+          done
+          wait $CHAOS_PID
+          kill $API_PID 2>/dev/null || true
+
   proto:
     name: Protocol Buffers
     runs-on: ubuntu-latest
