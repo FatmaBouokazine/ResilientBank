@@ -182,7 +182,7 @@ func healthClass(s status) (string, string) {
 	}
 }
 
-func page(s status, payHTML string) string {
+func pageStatus(s status) string {
 	class, message := healthClass(s)
 
 	formatAge := func(sec float64) string {
@@ -198,7 +198,7 @@ func page(s status, payHTML string) string {
 <meta charset="utf-8">
 <meta http-equiv="refresh" content="3">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ResilientBank — Live Status</title>
+<title>ResilientBank ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Live Status</title>
 <style>
   body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; background: #fafafa; }
   h1 { font-size: 1.6em; margin-bottom: 0.2em; }
@@ -216,11 +216,31 @@ func page(s status, payHTML string) string {
   .dot.ok { background: #34a853; }
   .dot.down { background: #d93025; }
   .foot { color: #888; font-size: 0.85em; margin-top: 2em; }
+  /* Stripe-style checkout */
+  .co-wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 1.2em; margin-top: 0.5em; }
+  @media (max-width: 640px) { .co-wrap { grid-template-columns: 1fr; } }
+  .co-form { background: white; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; box-shadow: 0 2px 8px rgba(60,66,87,0.08); }
+  .co-title { font-size: 1.25em; font-weight: 600; color: #32325d; margin-bottom: 1em; }
+  .co-label { display: block; font-size: 0.85em; font-weight: 500; color: #424770; margin-bottom: 0.6em; }
+  .co-input { display: block; width: 100%%; box-sizing: border-box; padding: 0.65em 0.75em; font-size: 1em; color: #32325d; background: white; border: 1px solid #e3e8ee; border-radius: 6px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+  .co-input:focus { border-color: #635bff; box-shadow: 0 0 0 3px rgba(99,91,255,0.15); }
+  .co-input::placeholder { color: #a3acb9; }
+  .co-box { border: 1px solid #e3e8ee; border-radius: 6px; overflow: hidden; margin-bottom: 0.6em; }
+  .co-box .co-input { border: none; border-radius: 0; }
+  .co-box .co-top { border-bottom: 1px solid #e3e8ee; }
+  .co-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7em; }
+  .co-pay { width: 100%%; margin-top: 1em; padding: 0.75em; font-size: 1.05em; font-weight: 600; color: white; background: #635bff; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
+  .co-pay:hover { background: #4f46e5; }
+  .co-secure { margin-top: 0.9em; font-size: 0.8em; color: #8792a2; text-align: center; }
+  .co-summary { background: #f6f9fc; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; align-self: start; }
+  .co-sum-title { font-weight: 600; color: #32325d; margin-bottom: 1em; }
+  .co-line { display: flex; justify-content: space-between; color: #525f7f; margin-bottom: 0.6em; }
+  .co-total { display: flex; justify-content: space-between; font-weight: 700; color: #32325d; border-top: 1px solid #e3e8ee; padding-top: 0.8em; margin-top: 0.8em; }
 </style>
 </head>
 <body>
-<h1>ResilientBank — Live Status</h1>
-<div class="sub">Refreshes every 3 seconds. Plain words, live numbers.</div>
+<h1>ResilientBank ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â Live Status</h1>
+<div class="sub">Refreshes every 3 seconds. Plain words, live numbers. <a href="/checkout">Send a payment</a></div>
 <div class="banner %s">%s</div>
 <div class="grid">
   <div class="card"><div class="num">%.0f</div><div class="lbl">payments recorded</div></div>
@@ -233,15 +253,7 @@ func page(s status, payHTML string) string {
 <h2 style="margin-top:1.5em">Services</h2>
 <div class="row">%s Payment service (takes your money safely)</div>
 <div class="row">%s Delivery worker (tells everyone about it)</div>
-<h2 style="margin-top:1.5em">Send a payment</h2>
-%s
-<form method="POST" action="/pay" style="background:white;border:1px solid #ddd;border-radius:8px;padding:1em 1.2em;display:grid;gap:0.7em;max-width:420px">
-  <label>From account<br><input name="from" value="acc-alice" required style="width:100%%;padding:0.4em"></label>
-  <label>To account<br><input name="to" value="acc-bob" required style="width:100%%;padding:0.4em"></label>
-  <label>Amount (cents)<br><input name="amount" value="5000" required pattern="[0-9]+" style="width:100%%;padding:0.4em"></label>
-  <label>Currency<br><input name="currency" value="EUR" required maxlength="3" style="width:100%%;padding:0.4em"></label>
-  <button type="submit" style="padding:0.6em;background:#1a73e8;color:white;border:none;border-radius:6px;font-size:1em;cursor:pointer">Send payment</button>
-</form>
+
 <div class="foot">Numbers come straight from the running system. Kill the broker and watch "waiting" grow, then drain to zero on recovery.</div>
 </body>
 </html>`,
@@ -253,8 +265,95 @@ func page(s status, payHTML string) string {
 		formatAge(s.BacklogOldestSec),
 		s.DeadLettered,
 		dot(s.APIUp), dot(s.RelayerUp),
-		payHTML,
 	)
+}
+
+// pageCheckout renders the standalone Stripe-style payment page.
+//
+// Separated from the status page so a demonstration can open one screen for "send money"
+// and another for "watch what happens". Both read the same backend; neither duplicates
+// payment logic.
+func pageCheckout(payHTML string) string {
+	return fmt.Sprintf(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ResilientBank Ã¢â‚¬â€ Checkout</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 2em auto; padding: 0 1em; color: #1a1a1a; background: #fafafa; }
+  a { color: #635bff; }
+  .banner { padding: 1em 1.2em; border-radius: 8px; margin-bottom: 1.5em; font-size: 1.1em; }
+  .banner.ok { background: #e6f4ea; border: 1px solid #34a853; }
+  .banner.down { background: #fce8e6; border: 1px solid #d93025; }
+  .co-wrap { display: grid; grid-template-columns: 1.2fr 1fr; gap: 1.2em; margin-top: 0.5em; }
+  @media (max-width: 640px) { .co-wrap { grid-template-columns: 1fr; } }
+  .co-form { background: white; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; box-shadow: 0 2px 8px rgba(60,66,87,0.08); }
+  .co-title { font-size: 1.25em; font-weight: 600; color: #32325d; margin-bottom: 1em; }
+  .co-label { display: block; font-size: 0.85em; font-weight: 500; color: #424770; margin-bottom: 0.6em; }
+  .co-input { display: block; width: 100%%; box-sizing: border-box; padding: 0.65em 0.75em; font-size: 1em; color: #32325d; background: white; border: 1px solid #e3e8ee; border-radius: 6px; outline: none; transition: border-color 0.15s, box-shadow 0.15s; }
+  .co-input:focus { border-color: #635bff; box-shadow: 0 0 0 3px rgba(99,91,255,0.15); }
+  .co-input::placeholder { color: #a3acb9; }
+  .co-box { border: 1px solid #e3e8ee; border-radius: 6px; overflow: hidden; margin-bottom: 0.6em; }
+  .co-box .co-input { border: none; border-radius: 0; }
+  .co-box .co-top { border-bottom: 1px solid #e3e8ee; }
+  .co-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0.7em; }
+  .co-pay { width: 100%%; margin-top: 1em; padding: 0.75em; font-size: 1.05em; font-weight: 600; color: white; background: #635bff; border: none; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
+  .co-pay:hover { background: #4f46e5; }
+  .co-secure { margin-top: 0.9em; font-size: 0.8em; color: #8792a2; text-align: center; }
+  .co-summary { background: #f6f9fc; border: 1px solid #e3e8ee; border-radius: 8px; padding: 1.4em; align-self: start; }
+  .co-sum-title { font-weight: 600; color: #32325d; margin-bottom: 1em; }
+  .co-line { display: flex; justify-content: space-between; color: #525f7f; margin-bottom: 0.6em; }
+  .co-total { display: flex; justify-content: space-between; font-weight: 700; color: #32325d; border-top: 1px solid #e3e8ee; padding-top: 0.8em; margin-top: 0.8em; }
+  .foot { color: #888; font-size: 0.85em; margin-top: 2em; }
+</style>
+</head>
+<body>
+<h1>ResilientBank Ã¢â‚¬â€ Checkout</h1>
+<div class="sub"><a href="/">Back to live status</a></div>
+%s
+<div class="co-wrap">
+  <form method="POST" action="/pay" class="co-form" id="payform">
+    <div class="co-title">Pay with ResilientBank</div>
+    <label class="co-label">Email
+      <input class="co-input" name="email" type="email" value="alice@example.com" required autocomplete="email">
+    </label>
+    <div class="co-label">Transfer details</div>
+    <div class="co-box">
+      <input class="co-input co-top" name="from" value="acc-alice" required placeholder="From account" autocomplete="off">
+      <input class="co-input co-bottom" name="to" value="acc-bob" required placeholder="To account" autocomplete="off">
+    </div>
+    <div class="co-row2">
+      <label class="co-label">Amount (cents)
+        <input class="co-input" name="amount" value="5000" required pattern="[0-9]+" inputmode="numeric" id="amountInput">
+      </label>
+      <label class="co-label">Currency
+        <input class="co-input" name="currency" value="EUR" required maxlength="3" style="text-transform:uppercase" id="currencyInput">
+      </label>
+    </div>
+    <button type="submit" class="co-pay" id="payBtn">Pay</button>
+    <div class="co-secure">Ã°Å¸â€â€™ Payments are recorded atomically. Duplicate references return the original payment, never a second charge.</div>
+  </form>
+  <div class="co-summary">
+    <div class="co-sum-title">Order summary</div>
+    <div class="co-line"><span>Transfer</span><span id="sumAmount">Ã¢â€šÂ¬50.00</span></div>
+    <div class="co-line"><span>Fee</span><span>Ã¢â€šÂ¬0.00</span></div>
+    <div class="co-total"><span>Total due</span><span id="sumTotal">Ã¢â€šÂ¬50.00</span></div>
+  </div>
+</div>
+<script>
+(function(){
+  var a=document.getElementById('amountInput'), c=document.getElementById('currencyInput'),
+      sa=document.getElementById('sumAmount'), st=document.getElementById('sumTotal'), b=document.getElementById('payBtn');
+  var sym={EUR:'\u20AC',USD:'$',GBP:'\u00A3'};
+  function fmt(){ var v=parseInt(a.value||'0',10)/100, s=sym[(c.value||'').toUpperCase()]||((c.value||'').toUpperCase()+' ');
+    var t=s+v.toFixed(2); sa.textContent=t; st.textContent=t; b.textContent='Pay '+t; }
+  a.addEventListener('input',fmt); c.addEventListener('input',fmt); fmt();
+})();
+</script>
+<div class="foot"><a href="/">Back to live status</a></div>
+</body>
+</html>`, payHTML)
 }
 
 // payResult renders the outcome of the last submitted payment, if any.
@@ -278,13 +377,17 @@ func main() {
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, pageStatus(collect(api, relayer)))
+	})
+	http.HandleFunc("/checkout", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		var payHTML string
 		if id := r.URL.Query().Get("paid"); id != "" {
 			payHTML = payResultHTML(true, id, "")
 		} else if msg := r.URL.Query().Get("err"); msg != "" {
 			payHTML = payResultHTML(false, "", msg)
 		}
-		fmt.Fprint(w, page(collect(api, relayer), payHTML))
+		fmt.Fprint(w, pageCheckout(payHTML))
 	})
 	http.HandleFunc("/pay", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -356,11 +459,11 @@ func handlePay(w http.ResponseWriter, r *http.Request, grpcAddr string, logger *
 		return
 	}
 
-	http.Redirect(w, r, "/?paid="+url.QueryEscape(resp.GetPaymentId()), http.StatusSeeOther)
+	http.Redirect(w, r, "/checkout?paid="+url.QueryEscape(resp.GetPaymentId()), http.StatusSeeOther)
 }
 
 func redirectErr(w http.ResponseWriter, r *http.Request, msg string) {
-	http.Redirect(w, r, "/?err="+url.QueryEscape(msg), http.StatusSeeOther)
+	http.Redirect(w, r, "/checkout?err="+url.QueryEscape(msg), http.StatusSeeOther)
 }
 
 // grpcMessage extracts the human-readable part of a gRPC error.
