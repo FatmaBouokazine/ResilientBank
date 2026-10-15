@@ -1,4 +1,4 @@
-.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run test integration smoke
+.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer test integration smoke
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -40,9 +40,10 @@ help:
 	@echo "  make proto                lint and regenerate protobuf stubs"
 	@echo "  make build                compile the services"
 	@echo "  make run                  run the payments API"
+	@echo "  make relayer              run the outbox relayer (publishes to Kafka)"
 	@echo "  make test                 unit tests (race detector)"
-	@echo "  make integration          atomicity tests against a real database"
-	@echo "  make smoke                end-to-end gRPC smoke suite"
+	@echo "  make integration          atomicity and relay tests against a real database"
+	@echo "  make smoke                end-to-end gRPC and event smoke suite"
 
 tools:
 	@echo "Installing pinned toolchain from tools/go.mod"
@@ -95,12 +96,20 @@ build:
 run:
 	cd services/payments-api && go run ./cmd/payments-api
 
+# The outbox relayer runs as its own process so broker stalls never reach payment
+# ingestion. Safe to leave stopped: events accumulate in the outbox and drain on start.
+relayer:
+	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/outbox-relayer
+
 test:
 	cd services/payments-api && go test -v -race ./...
 
-# Integration tests prove transactional atomicity against a real database and cannot run
-# against in-memory fakes. Requires `make up migrate` first. Point at a non-default
-# instance with TEST_DATABASE_URL if 5432 is occupied by a local PostgreSQL.
+# Integration tests prove transactional atomicity and relay behaviour against a real
+# database and cannot run on in-memory fakes. Requires `make up migrate` first. Point at a
+# non-default instance with TEST_DATABASE_URL if 5432 is occupied by a local PostgreSQL.
+#
+# Do NOT run `make relayer` at the same time: a live relayer will drain the outbox before
+# the tests' fake publisher observes it, and the relay tests will fail for the wrong reason.
 integration:
 	cd services/payments-api && TEST_DATABASE_URL="$(DATABASE_URL)" go test -v -race -tags=integration ./...
 

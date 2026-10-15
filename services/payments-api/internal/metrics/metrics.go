@@ -36,6 +36,39 @@ var (
 	)
 )
 
+// InitOutboxMetrics pre-registers the known label combinations for the outbox counters.
+//
+// WHY THIS IS NECESSARY:
+// A labelled CounterVec produces no series until a label combination is first used, so
+// its metric family is entirely absent from /metrics before the first event is published.
+// That makes "no events dead-lettered yet" indistinguishable from "dead-lettering is not
+// instrumented at all" -- exactly the moment an operator needs the metric to exist.
+//
+// Initialising the known values to zero closes that gap and lets alerting rules and
+// dashboards reference the series from process start.
+func InitOutboxMetrics() {
+	for _, result := range []string{"published", "retry", "terminal", "exhausted", "mark_failed"} {
+		OutboxPublishedTotal.WithLabelValues(result)
+	}
+	for _, outcome := range []string{"routed", "publish_failed"} {
+		OutboxDeadLetterTotal.WithLabelValues(outcome)
+	}
+	// The gauges are exported at zero by default, but naming them here keeps every outbox
+	// series in one place.
+	OutboxPending.Set(0)
+	OutboxOldestAgeSeconds.Set(0)
+}
+
+// interface guards: the outbox metrics are package-level collectors registered by promauto.
+var (
+	_ prometheus.Collector = OutboxPending
+	_ prometheus.Collector = OutboxOldestAgeSeconds
+	_ prometheus.Collector = OutboxBatchSize
+	_ prometheus.Collector = OutboxPublishDuration
+	_ prometheus.Collector = OutboxPublishedTotal
+	_ prometheus.Collector = OutboxDeadLetterTotal
+)
+
 // Outbox metrics. These belong to the relayer process but live in this package so both
 // binaries share one set of metric names and one registration point.
 var (

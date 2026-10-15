@@ -73,27 +73,86 @@ that preserves existing payments.
    make run
    ```
 
-3. **Run the Smoke Test Suite** (verifies gRPC reflection, idempotency, conflict detection, validation, metrics):
+3. **Run the Outbox Relayer** (publishes committed payments to Kafka):
+   ```bash
+   make relayer
+   ```
+   It runs as a separate process from the payment API so broker stalls, backpressure, and
+   partition events can never reach payment ingestion. It is safe to leave stopped: events
+   accumulate in the outbox and drain when it restarts.
+
+4. **Run the Smoke Test Suite** (verifies gRPC reflection, idempotency, conflict detection, validation, metrics, and end-to-end event relay):
    ```bash
    make smoke
    ```
 
-4. **Run Unit Tests**:
+5. **Run Unit Tests**:
    ```bash
    make test
    ```
 
-5. **Run Atomicity Integration Tests** (proves the outbox transaction against a real database):
+6. **Run Integration Tests** (proves outbox atomicity and relay behaviour against a real database):
    ```bash
    make integration
    ```
 
-6. **Stop infrastructure**:
+7. **Stop infrastructure**:
    ```bash
    make down
    ```
 
 `make help` lists every available target.
+
+## Event Pipeline
+
+A committed payment produces an `events.v1.PaymentEvent` on Kafka. The flow:
+
+```
+payment gRPC call
+   └─ one transaction ─┬─ INSERT payments
+                       └─ INSERT outbox          (atomic; ADR 0002)
+                                    │
+                    outbox-relayer (separate process)
+                                    │  FOR UPDATE SKIP LOCKED
+                                    ├─ publish ─────────► payments.events.v1
+                                    └─ publish (dead) ──► payments.events.v1.dlq
+```
+
+| Behaviour | Where it comes from |
+|---|---|
+| Keying | Partition key is the payment id, so one payment's events stay ordered |
+| Retries | Transient publish failures back off exponentially, then route to the DLQ after `OUTBOX_MAX_ATTEMPTS` |
+| Permanent failures | Oversized or rejected records go straight to the DLQ with the original payload preserved |
+| Broker outage | Payments keep succeeding; the backlog grows and drains on recovery |
+| Duplicate events | Possible on relayer crash between publish and mark; consumers deduplicate on `event_id` |
+
+### Relayer configuration
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `KAFKA_BROKERS` | `localhost:9092` | Comma-separated brokers. Containerised clients must use the INTERNAL address `kafka:29092` |
+| `KAFKA_ENABLED` | `true` | `false` makes publishing a no-op so a stack can run without a broker |
+| `KAFKA_TOPIC_EVENTS` | `payments.events.v1` | Destination for payment events |
+| `KAFKA_TOPIC_DLQ` | `payments.events.v1.dlq` | Destination for unpublishable events |
+| `OUTBOX_POLL_INTERVAL` | `500ms` | Idle poll cadence |
+| `OUTBOX_BATCH_SIZE` | `100` | Maximum events claimed per poll |
+| `OUTBOX_MAX_ATTEMPTS` | `10` | Attempts before an event is dead-lettered |
+| `OUTBOX_BACKOFF_BASE` / `_MAX` | `1s` / `5m` | Exponential backoff bounds, with jitter |
+
+### Monitoring the relay
+
+| Metric | Meaning |
+|---|---|
+| `resilientbank_outbox_pending` | Backlog depth. A growing value means the relayer cannot keep up |
+| `resilientbank_outbox_oldest_pending_age_seconds` | Age of the oldest unpublished event. More telling than depth |
+| `resilientbank_outbox_published_total{result}` | Outcomes: `published`, `retry`, `terminal`, `exhausted`, `mark_failed` |
+| `resilientbank_outbox_dead_letter_total{outcome}` | `routed`, and `publish_failed` — the latter means an event was neither delivered nor quarantined and needs attention |
+
+The relayer serves its own metrics endpoint on `:2113`, separate from the payment API's
+`:2112`, so the two processes never contend for a port.
+
+> The relayer uses franz-go, a pure-Go Kafka client. There is no cgo or C toolchain
+> requirement on any platform.
 
 ## Contributing
 
@@ -116,11 +175,13 @@ make integration  # atomicity tests against a real database
 ## Architecture Roadmap
 
 - [x] **Phase 1: Local Region A Payment Service** — gRPC Payment API, two-layer idempotency (Redis fast-path + PostgreSQL UNIQUE constraint), Prometheus instrumentation, local Docker Compose infra, smoke tests, and CI.
-- [ ] **Phase 2: Event-Driven Core & Outbox Pattern** — payment events are staged in a transactional outbox and published to Kafka by a separate relayer, with dead-letter routing.
+- [x] **Phase 2: Event-Driven Core & Outbox Pattern** — payment events are staged in a transactional outbox and published to Kafka by a separate relayer, with dead-letter routing.
   - [x] Payment event contract (`events.v1.PaymentEvent`) with `buf breaking` enforcement
   - [x] Payment and outbox row written atomically in one transaction (ADR 0002)
-  - [ ] Kafka producer and `outbox-relayer` process
-  - [ ] Retry backoff and dead-letter queue
+  - [x] Kafka producer (franz-go, idempotent, acks=all) behind a `Publisher` interface
+  - [x] `outbox-relayer` with `FOR UPDATE SKIP LOCKED` claiming
+  - [x] Exponential retry backoff and dead-letter routing
+  - [x] Outbox backlog, publish, and dead-letter metrics
 - [ ] **Phase 2: Event-Driven Core & Outbox Pattern** — Kafka producer integration, transactional outbox in PostgreSQL, and dead-letter queues.
 - [ ] **Phase 3: High-Availability Consensus & WAL** — BadgerDB Write-Ahead Log (WAL) and Raft consensus node for local durability.
 - [ ] **Phase 4: Dual-Region Active-Active Replication** — Region B deployment, cross-region replication, conflict resolution, and split-brain mitigation.

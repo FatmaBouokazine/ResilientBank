@@ -26,6 +26,7 @@ import (
 
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/config"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/kafka"
+	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/metrics"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/outbox"
 )
 
@@ -96,6 +97,11 @@ func run(logger *slog.Logger) error {
 	}
 
 	relayer := outbox.NewRelayer(outbox.NewStore(pool), publisher, outboxConfig(cfg), logger)
+
+	// Publish the outbox series at zero before serving metrics. Without this, a labelled
+	// counter such as the dead-letter metric has no series until its first event, so an
+	// operator cannot tell "nothing has failed yet" apart from "nothing is instrumented".
+	metrics.InitOutboxMetrics()
 
 	// Metrics run in their own server so a scrape never competes with the publish loop,
 	// and so backlog depth stays observable even when the broker is down.

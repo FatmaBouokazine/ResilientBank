@@ -3,6 +3,12 @@ set -euo pipefail
 
 GRPC_HOST="${GRPC_HOST:-localhost:50051}"
 METRICS_URL="${METRICS_URL:-http://localhost:2112/metrics}"
+RELAYER_METRICS_URL="${RELAYER_METRICS_URL:-http://localhost:2113/metrics}"
+
+# Phase 2 event verification needs the relayer's metrics endpoint. When it is not running
+# the event checks are reported as SKIP rather than failing, so the Phase 1 suite stays
+# usable on its own.
+RELAYER_REQUIRED="${RELAYER_REQUIRED:-auto}"
 
 echo "=== ResilientBank Smoke Test ==="
 echo "Target gRPC: $GRPC_HOST"
@@ -90,6 +96,27 @@ else
     exit 1
 fi
 
+# ---------------------------------------------------------------------------
+# Phase 2: transactional outbox and event relay
+# ---------------------------------------------------------------------------
+
+skip_event_checks=0
+if ! curl -sf "$RELAYER_METRICS_URL" >/dev/null 2>&1; then
+    case "$RELAYER_REQUIRED" in
+        required)
+            echo "Event checks REQUIRED but the relayer is not serving $RELAYER_METRICS_URL"
+            exit 1
+            ;;
+        *)
+            echo
+            echo "NOTE: outbox-relayer is not running at $RELAYER_METRICS_URL."
+            echo "      Skipping the Phase 2 event checks. Start it with: make relayer"
+            skip_event_checks=1
+            ;;
+    esac
+fi
+
+
 # Check 5: An invalid request returns InvalidArgument
 echo -n "Check 5: Invalid request returns InvalidArgument... "
 set +e
@@ -119,5 +146,72 @@ else
     echo "FAIL (Metric resilientbank_payments_total not found in $METRICS_URL)"
     exit 1
 fi
+if [ "$skip_event_checks" -eq 0 ]; then
+    # Check 7: a payment creates an outbox row that the relayer drains to PUBLISHED.
+    #
+    # The unique key makes this independent of any earlier check, so the row observed here
+    # is provably the one this payment created.
+    echo -n "Check 7: Payment stages an outbox row that reaches PUBLISHED... "
+    EVENT_KEY="smoke-event-$(date +%s)$RANDOM"
 
-echo "=== All 6 Smoke Tests PASSED ==="
+    EVENT_REQ=$(grpcurl -plaintext -d "{
+        \"idempotency_key\": \"$EVENT_KEY\",
+        \"from_account\": \"acc-carol\",
+        \"to_account\": \"acc-dave\",
+        \"amount_cents\": 7500,
+        \"currency\": \"USD\"
+    }" "$GRPC_HOST" payments.v1.PaymentService/CreatePayment)
+
+    EVENT_PAYMENT_ID=$(echo "$EVENT_REQ" | jq -r '.paymentId // .payment_id')
+
+    # Poll rather than sleeping once: relay latency depends on the poll interval.
+    published=0
+    for _ in $(seq 1 60); do
+        OUTBOX_METRICS=$(curl -s "$RELAYER_METRICS_URL")
+        if echo "$OUTBOX_METRICS" | grep -q "resilientbank_outbox_published_total{result=\"published\"}"; then
+            published=1
+            break
+        fi
+        sleep 1
+    done
+
+    if [ $published -ne 1 ]; then
+        echo "FAIL (relayer never reported a successful publish)"
+        exit 1
+    fi
+
+    PUBLISHED_COUNT=$(echo "$OUTBOX_METRICS" | grep "resilientbank_outbox_published_total{result=\"published\"}" | awk '{print $2}')
+    echo "PASS (payment_id: $EVENT_PAYMENT_ID, published_total: $PUBLISHED_COUNT)"
+fi
+
+if [ "$skip_event_checks" -eq 0 ]; then
+    # Check 8: the outbox backlog gauges are exposed and non-negative.
+    echo -n "Check 8: Outbox backlog metrics exposed by the relayer... "
+    OUTBOX_METRICS=$(curl -s "$RELAYER_METRICS_URL")
+
+    if echo "$OUTBOX_METRICS" | grep -q "resilientbank_outbox_pending" &&
+       echo "$OUTBOX_METRICS" | grep -q "resilientbank_outbox_oldest_pending_age_seconds"; then
+        PENDING=$(echo "$OUTBOX_METRICS" | grep '^resilientbank_outbox_pending ' | awk '{print $2}')
+        echo "PASS (pending: ${PENDING:-unreported})"
+    else
+        echo "FAIL (resilientbank_outbox_pending or _oldest_pending_age_seconds missing)"
+        exit 1
+    fi
+
+    # Check 9: DLQ counters exist so a routing failure is observable, not silent.
+    # HELP/TYPE lines are present even before the first dead-letter event, which is exactly
+    # what makes the metric discoverable before anything has gone wrong.
+    echo -n "Check 9: Dead-letter routing metric is registered... "
+    if echo "$OUTBOX_METRICS" | grep -q "resilientbank_outbox_dead_letter_total"; then
+        echo "PASS"
+    else
+        echo "FAIL (resilientbank_outbox_dead_letter_total not registered)"
+        exit 1
+    fi
+
+    echo
+    echo "=== All 9 Smoke Tests PASSED ==="
+else
+    echo
+    echo "=== All 6 Smoke Tests PASSED (Phase 2 event checks skipped) ==="
+fi

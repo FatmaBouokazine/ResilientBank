@@ -1,5 +1,26 @@
 //go:build integration
 
+// Package integration contains tests that prove transactional atomicity and event relay
+// behaviour against a real PostgreSQL instance.
+//
+// Unit tests cannot demonstrate atomicity. Rollback behaviour only exists in the
+// database's transaction log, so these tests deliberately use a live database rather than
+// an in-memory fake, which would happily report success for a write that was never
+// durable.
+//
+// IMPORTANT: do NOT run a real `outbox-relayer` against the same database while these
+// tests execute. The relayer would drain the outbox and mark rows PUBLISHED before the
+// fake publisher in this package ever sees them, and most tests here would fail for reasons
+// that have nothing to do with the code under test. If relay tests fail unexpectedly, check
+// for a stray `make relayer` first.
+//
+// Run with:
+//
+//	make up migrate
+//	make integration
+//
+// Set TEST_DATABASE_URL to point at a different instance. The schema must already contain
+// the tables from services/payments-api/migrations.
 package integration
 
 import (
