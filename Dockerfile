@@ -58,4 +58,3 @@ COPY --from=builder /out/migrate        /usr/local/bin/migrate
 USER nonroot:nonroot
 
 ENTRYPOINT ["/usr/local/bin/payments-api"]
-

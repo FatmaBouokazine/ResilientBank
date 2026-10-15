@@ -27,13 +27,16 @@ node_modules/
 .angular/
 .npm/
 
-# Terraform
+# Terraform / IaC
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored. It pins provider versions for
+# everyone, which is the same reason buf and the protoc plugins are pinned in tools/go.mod.
 .terraform/
 *.tfstate
 *.tfstate.*
+# Variable files may contain environment-specific or sensitive values, so they are not
+# committed. Commit .tfvars.example instead.
 *.tfvars
 *.tfvars.json
-.terraform.lock.hcl
 
 # Environment & Secrets
 .env

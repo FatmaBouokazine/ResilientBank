@@ -1,4 +1,4 @@
-.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up
+.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -24,6 +24,16 @@ BUF_VERSION             := v1.50.0
 PROTOC_GEN_GO_VERSION   := v1.36.12
 PROTOC_GEN_GRPC_VERSION := v1.5.1
 
+recorder := develop
+KUBECTL ?= kubectl
+# Terraform must be told which cluster to touch. Relying on ambient kubeconfig defaults
+# produced a confusing "could not find the requested resource (post namespaces)" failure
+# against a stale context, so the target is always explicit.
+KUBE_CONTEXT ?= minikube
+KUBECONFIG_PATH ?= $(HOME)/.kube/config
+TF := terraform -chdir=deploy/terraform
+TF_VARS := -var kubeconfig_path=$(KUBECONFIG_PATH) -var kube_context=$(KUBE_CONTEXT)
+
 help:
 	@echo "Setup:"
 	@echo "  make tools                install pinned buf + protoc plugins"
@@ -41,9 +51,22 @@ help:
 	@echo "  make build                compile the services"
 	@echo "  make run                  run the payments API"
 	@echo "  make relayer              run the outbox relayer (publishes to Kafka)"
+	@echo "  make dashboard            run live plain-language status dashboard"
 	@echo "  make test                 unit tests (race detector)"
 	@echo "  make integration          atomicity and relay tests against a real database"
 	@echo "  make smoke                end-to-end gRPC and event smoke suite"
+	@echo "  make tlc                  run TLA+ model checker for Raft consensus"
+	@echo ""
+	@echo "Full local Docker stack:"
+	@echo "  make up-all               start infra, migrations, services, and dashboard"
+	@echo "  make up-fresh             start clean full stack (drops old data)"
+	@echo ""
+	@echo "Kubernetes / Terraform / ArgoCD:"
+	@echo "  make tf-init              initialize terraform working directory"
+	@echo "  make tf-plan              plan terraform infrastructure"
+	@echo "  make tf-apply             apply terraform infrastructure"
+	@echo "  make argocd-bootstrap     bootstrap ArgoCD on cluster"
+	@echo "  make k8s-up               full cluster deploy via Terraform, ArgoCD, and manifests"
 
 tools:
 	@echo "Installing pinned toolchain from tools/go.mod"
@@ -122,6 +145,10 @@ integration:
 smoke:
 	$(BASH) scripts/smoke-test.sh
 
+# Formal verification with TLC
+tlc:
+	$(BASH) scripts/run-tlc.sh
+
 # Builds everything and starts the whole stack in Docker: infra, schema, application,
 # dashboards. This is the one command for "show me the system working".
 up-all:
@@ -129,3 +156,40 @@ up-all:
 
 up-fresh:
 	$(BASH) scripts/docker-up.sh --fresh
+
+# --- Kubernetes / Terraform / ArgoCD -------------------------------------------
+# K8S_TARGET is the cluster these targets operate on. Point it at a dev cluster only.
+
+tf-init:
+	$(TF) init -input=false
+
+# tf-plan and tf-apply require a reachable cluster. KUBE_CONTEXT and KUBECONFIG_PATH are
+# passed explicitly rather than relying on whatever the ambient kubeconfig points at.
+tf-plan:
+	$(TF) plan -input=false $(TF_VARS)
+
+tf-apply:
+	$(TF) apply -input=false -auto-approve $(TF_VARS)
+
+tf-destroy:
+	$(TF) destroy -input=false $(TF_VARS)
+
+# Installs the pinned ArgoCD release into KUBE_CONTEXT.
+argocd-bootstrap:
+	$(BASH) scripts/argocd-bootstrap.sh
+
+# Builds the service image and loads it into the target cluster's container runtime.
+image-build:
+	docker build -t resilientbank:dev -f Dockerfile .
+
+image-load:
+	minikube image load resilientbank:dev
+
+# Full local cluster bootstrap: infrastructure, schema, ArgoCD, application.
+k8s-up: tf-init tf-apply image-load argocd-bootstrap
+	$(KUBECTL) apply -f deploy/k8s/app/
+	@echo
+	@echo "Watching the rollout (this can take a few minutes on a cold cluster):"
+	$(KUBECTL) wait --for=condition=Available -n resilientbank \
+		deployment/payments-api deployment/outbox-relayer --timeout=300s
+	$(KUBECTL) get pods -n resilientbank

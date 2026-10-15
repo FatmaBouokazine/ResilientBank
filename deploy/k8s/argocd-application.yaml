@@ -1,0 +1,59 @@
+# ArgoCD Application for the payments platform.
+#
+# This is the point of the bootstrap: once this exists, deploy/k8s/ reaches the cluster by
+# pull request. Nobody runs kubectl against the application namespace again.
+#
+# AUTO-SYNC IS OFF ON PURPOSE.
+# An automated self-heal that deletes a running payments deployment because someone pushed
+# a broken manifest is a worse failure than a deployment that stays visibly out of sync.
+# Sync is a human decision until the manifest set has automated verification behind it.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: resilientbank
+  namespace: argocd
+spec:
+  description: ResilientBank payments platform
+  sourceRepos:
+    - https://github.com/FatmaBouokazine/ResilientBank.git
+  destinations:
+    - namespace: resilientbank
+      server: https://kubernetes.default.svc
+  # clusterResourceWhitelist is deliberately omitted. An absent list DENIES every
+  # cluster-scoped resource, which is the posture we want: ArgoCD owns one namespace, and
+  # the argocd namespace is applied by Terraform. Giving ArgoCD cluster-scoped write
+  # access would mean a compromised controller could delete or alter its own control plane.
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: resilientbank
+  namespace: argocd
+  finalizers:
+    # Removing the finalizer would leave orphaned resources behind on deletion.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: resilientbank
+  source:
+    repoURL: https://github.com/FatmaBouokazine/ResilientBank.git
+    targetRevision: feat/phase2-step4-kafka-topics
+    path: deploy/k8s/app
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: resilientbank
+  syncPolicy:
+    automated:
+      # Deliberately not enabled. See the note above.
+      prune: false
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=false
+      # Honour the sync-wave annotations so the migration Job completes before the
+      # Deployments roll. Without this the application would start against an empty schema.
+      - RespectWaveDeletions=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
