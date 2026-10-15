@@ -24,6 +24,14 @@ jobs:
         with:
           go-version-file: services/payments-api/go.mod
 
+      # The committed toolchain pins are the contract for generated code. Verifying them
+      # here means a wrong local install is caught before it can produce a diff.
+      - name: Verify pinned toolchain
+        run: |
+          go install github.com/bufbuild/buf/cmd/buf@v1.50.0
+          go install google.golang.org/protobuf/cmd/protoc-gen-go@v1.36.12
+          go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@v1.5.1
+
       - name: Verify vet and build
         working-directory: services/payments-api
         run: |
@@ -65,14 +73,28 @@ jobs:
         with:
           go-version-file: services/payments-api/go.mod
 
-      # Service containers skip /docker-entrypoint-initdb.d, so migrations are applied
-      # explicitly in filename order.
+# The migrator is the single source of truth for the schema. CI applies it the
+      # same way a developer does, so a migration that works locally cannot skip CI.
       - name: Apply database migrations
+        working-directory: services/payments-api
+        env:
+          DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
+        run: go run ./cmd/migrate up
+
+      - name: Assert no migrations left pending
+        working-directory: services/payments-api
         run: |
-          for f in deploy/local/migrations/*.sql; do
-            echo "applying $f"
-            psql -v ON_ERROR_STOP=1 -h localhost -U resilient -d payments -f "$f"
-          done
+          # goose writes its logger output to stderr, so 2>&1 is required. Without it
+          # this captures nothing, the grep never matches, and the check silently
+          # passes on an unapplied migration.
+          status="$(go run ./cmd/migrate status 2>&1)"
+          echo "$status"
+          # `migrate status` prints a "Pending" row per unapplied migration; the
+          # column header reads "Applied At" when everything is applied.
+          if echo "$status" | grep -q "Pending"; then
+            echo "::error::migrations are still pending after 'migrate up'"
+            exit 1
+          fi
 
       - name: Run atomicity integration tests
         working-directory: services/payments-api

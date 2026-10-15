@@ -129,10 +129,10 @@ func newRequest(t *testing.T, idemKey string, amountCents int64) *paymentsv1.Cre
 	t.Helper()
 	return &paymentsv1.CreatePaymentRequest{
 		IdempotencyKey: idemKey,
-		FromAccount:   "acc-alice",
-		ToAccount:     "acc-bob",
-		AmountCents:   amountCents,
-		Currency:      "EUR",
+		FromAccount:    "acc-alice",
+		ToAccount:      "acc-bob",
+		AmountCents:    amountCents,
+		Currency:       "EUR",
 	}
 }
 
