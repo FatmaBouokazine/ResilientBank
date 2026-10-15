@@ -1,4 +1,4 @@
-.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer test integration smoke
+.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -100,6 +100,12 @@ run:
 # ingestion. Safe to leave stopped: events accumulate in the outbox and drain on start.
 relayer:
 	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/outbox-relayer
+
+# Live plain-language status page for demonstrations. Reads the metrics endpoints of the
+# payment service and the relayer and renders them without protocol vocabulary.
+# Open http://localhost:2114 while the stack is up.
+dashboard:
+	cd services/payments-api && go run ./cmd/dashboard
 
 test:
 	cd services/payments-api && go test -v -race ./...
