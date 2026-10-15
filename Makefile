@@ -1,4 +1,4 @@
-.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs proto build run test integration smoke
+.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run test integration smoke
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -33,6 +33,7 @@ help:
 	@echo "  make up                   start infrastructure"
 	@echo "  make migrate              apply pending database migrations"
 	@echo "  make migrate-status       show applied/pending migrations"
+	@echo "  make topics               create the Kafka topics (idempotent)"
 	@echo "  make reset                DESTRUCTIVE: drop volumes and start clean"
 	@echo ""
 	@echo "Build and test:"
@@ -78,6 +79,12 @@ dev-up: up migrate
 
 logs:
 	$(COMPOSE) logs -f
+
+# Recreate the Kafka topics. Idempotent: existing topics keep their configuration.
+# Needed after adding a topic, or to repair a broker volume that was wiped.
+topics:
+	$(COMPOSE) up -d kafka kafka-init
+	$(COMPOSE) logs -f kafka-init
 
 proto:
 	buf lint && buf generate
