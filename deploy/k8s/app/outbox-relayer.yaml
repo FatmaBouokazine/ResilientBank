@@ -1,0 +1,66 @@
+# Outbox relayer: drains committed payment events to Kafka.
+#
+# Deployed separately from payments-api so a Kafka stall or partition cannot consume the
+# API's resources or affect payment ingestion. Both share the ConfigMap, so the broker
+# address and topic names cannot drift between producer and consumer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: outbox-relayer
+  namespace: resilientbank
+  labels:
+    app.kubernetes.io/name: outbox-relayer
+    app.kubernetes.io/part-of: resilientbank
+    app.kubernetes.io/component: relay
+spec:
+  # Two replicas is deliberate: FOR UPDATE SKIP LOCKED lets them poll concurrently without
+  # blocking each other, so throughput scales. Running one would leave that path untested.
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: outbox-relayer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: outbox-relayer
+        app.kubernetes.io/part-of: resilientbank
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+        - name: outbox-relayer
+          image: resilientbank:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/outbox-relayer"]
+          ports:
+            - name: metrics
+              containerPort: 2112
+          envFrom:
+            - configMapRef:
+                name: resilientbank-config
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 192Mi
+          # The relayer has no gRPC surface, so readiness is an HTTP scrape of its own
+          # metrics endpoint. That endpoint is served as soon as the process is up, which
+          # is the correct signal here: the relayer must stay alive even while Kafka is
+          # down, accumulating the backlog for later.
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            periodSeconds: 10
+            failureThreshold: 3
+      # Long enough for an in-flight publish batch to finish, so a rolling update does not
+      # abandon claimed outbox rows and force redelivery.
+      terminationGracePeriodSeconds: 30

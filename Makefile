@@ -1,4 +1,4 @@
-.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer test integration smoke
+.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -23,6 +23,16 @@ DATABASE_URL ?= postgres://resilient:resilient@127.0.0.1:$(POSTGRES_PORT)/paymen
 BUF_VERSION             := v1.50.0
 PROTOC_GEN_GO_VERSION   := v1.36.12
 PROTOC_GEN_GRPC_VERSION := v1.5.1
+
+recorder := develop
+KUBECTL ?= kubectl
+# Terraform must be told which cluster to touch. Relying on ambient kubeconfig defaults
+# produced a confusing "could not find the requested resource (post namespaces)" failure
+# against a stale context, so the target is always explicit.
+KUBE_CONTEXT ?= minikube
+KUBECONFIG_PATH ?= $(HOME)/.kube/config
+TF := terraform -chdir=deploy/terraform
+TF_VARS := -var kubeconfig_path=$(KUBECONFIG_PATH) -var kube_context=$(KUBE_CONTEXT)
 
 help:
 	@echo "Setup:"
@@ -115,3 +125,40 @@ integration:
 
 smoke:
 	$(BASH) scripts/smoke-test.sh
+
+# --- Kubernetes / Terraform / ArgoCD -------------------------------------------
+# K8S_TARGET is the cluster these targets operate on. Point it at a dev cluster only.
+
+tf-init:
+	$(TF) init -input=false
+
+# tf-plan and tf-apply require a reachable cluster. KUBE_CONTEXT and KUBECONFIG_PATH are
+# passed explicitly rather than relying on whatever the ambient kubeconfig points at.
+tf-plan:
+	$(TF) plan -input=false $(TF_VARS)
+
+tf-apply:
+	$(TF) apply -input=false -auto-approve $(TF_VARS)
+
+tf-destroy:
+	$(TF) destroy -input=false $(TF_VARS)
+
+# Installs the pinned ArgoCD release into KUBE_CONTEXT.
+argocd-bootstrap:
+	$(BASH) scripts/argocd-bootstrap.sh
+
+# Builds the service image and loads it into the target cluster's container runtime.
+image-build:
+	docker build -t resilientbank:dev -f Dockerfile .
+
+image-load:
+	minikube image load resilientbank:dev
+
+# Full local cluster bootstrap: infrastructure, schema, ArgoCD, application.
+k8s-up: tf-init tf-apply image-load argocd-bootstrap
+	$(KUBECTL) apply -f deploy/k8s/app/
+	@echo
+	@echo "Watching the rollout (this can take a few minutes on a cold cluster):"
+	$(KUBECTL) wait --for=condition=Available -n resilientbank \
+		deployment/payments-api deployment/outbox-relayer --timeout=300s
+	$(KUBECTL) get pods -n resilientbank
