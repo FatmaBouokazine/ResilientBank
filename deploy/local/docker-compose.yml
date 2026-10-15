@@ -9,13 +9,15 @@ services:
       POSTGRES_PASSWORD: resilient
       POSTGRES_DB: payments
     ports:
-      - "5432:5432"
+      # Override with POSTGRES_PORT when a local PostgreSQL already owns 5432, e.g.
+      # `make up migrate integration POSTGRES_PORT=5433`.
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      # Scripts run in lexicographic order on first container start, so the numeric
-      # filename prefix defines migration order. NOTE: these apply only to an EMPTY
-      # volume. After adding a migration run `make reset` to recreate the database.
-      - ./migrations:/docker-entrypoint-initdb.d:ro
+      # NOTE: no schema is mounted here. The schema is applied by the goose migrator
+      # (`make migrate`), which can also upgrade an existing database. Mounting SQL into
+      # docker-entrypoint-initdb.d would create a second source of truth that only ever
+      # runs on an empty volume, which is how the two would silently drift apart.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U resilient -d payments"]
       interval: 5s

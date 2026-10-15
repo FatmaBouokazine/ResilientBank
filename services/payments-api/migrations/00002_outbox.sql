@@ -1,3 +1,5 @@
+-- +goose Up
+--
 -- Transactional outbox: durable staging for domain events awaiting publication to Kafka.
 --
 -- A payment row and its outbox row are inserted inside one transaction, so a committed
@@ -52,3 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_outbox_pending
 -- Supports per-aggregate history lookups and, later, partition-key auditing.
 CREATE INDEX IF NOT EXISTS idx_outbox_aggregate
     ON outbox (aggregate_type, aggregate_id);
+
+-- +goose Down
+--
+-- DESTRUCTIVE. Drops the outbox, which discards every event that has not yet been
+-- published to Kafka.
+--
+-- Dropping the outbox while payments remain breaks the guarantee described in ADR 0002:
+-- those payments would exist with no way to ever emit their events. In a real
+-- deployment, drain the outbox to zero before rolling this back.
+DROP TABLE IF EXISTS outbox;

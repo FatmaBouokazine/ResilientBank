@@ -1,4 +1,4 @@
-.PHONY: help tools verify up down reset migrate migrate-down migrate-status logs proto build run test integration smoke
+.PHONY: help tools verify up down reset migrate migrate-down migrate-status dev-up logs proto build run test integration smoke
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -10,6 +10,10 @@ COMPOSE := docker compose -f deploy/local/docker-compose.yml
 # Postgres host port. Override when a local PostgreSQL already owns 5432:
 #   make up migrate integration POSTGRES_PORT=5433
 POSTGRES_PORT ?= 5432
+
+# Connection string used by the migrator, the service, and the integration tests.
+# Derived from POSTGRES_PORT so all three agree even on a non-default port.
+DATABASE_URL ?= postgres://resilient:resilient@127.0.0.1:$(POSTGRES_PORT)/payments?sslmode=disable
 
 # Tool versions below MUST match the require block in tools/go.mod.
 # tools/go.mod is the source of truth; `make verify` fails if these drift apart.
@@ -59,13 +63,18 @@ reset:
 	$(COMPOSE) down -v
 
 migrate:
-	cd services/payments-api && go run ./cmd/migrate up
+	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate up
 
 migrate-down:
-	cd services/payments-api && go run ./cmd/migrate down
+	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate down
 
 migrate-status:
-	cd services/payments-api && go run ./cmd/migrate status
+	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate status
+
+# Single command for a working local stack, for developers who are not using a migration
+# runner in their own workflow. Waits for Postgres to report healthy before migrating so
+# the first developer to clone does not hit a connection race.
+dev-up: up migrate
 
 logs:
 	$(COMPOSE) logs -f
@@ -86,7 +95,7 @@ test:
 # against in-memory fakes. Requires `make up migrate` first. Point at a non-default
 # instance with TEST_DATABASE_URL if 5432 is occupied by a local PostgreSQL.
 integration:
-	cd services/payments-api && TEST_DATABASE_URL="$${TEST_DATABASE_URL:-postgres://resilient:resilient@127.0.0.1:$(POSTGRES_PORT)/payments?sslmode=disable}" go test -v -race -tags=integration ./...
+	cd services/payments-api && TEST_DATABASE_URL="$(DATABASE_URL)" go test -v -race -tags=integration ./...
 
 smoke:
 	$(BASH) scripts/smoke-test.sh
