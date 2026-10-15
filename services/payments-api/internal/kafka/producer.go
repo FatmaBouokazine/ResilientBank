@@ -1,245 +1,133 @@
-// Package kafka publishes outbox events to Kafka.
-//
-// The producer is deliberately thin. All durability decisions belong to the outbox table
-// and the relayer; the producer's only job is to hand a message to the broker and report
-// whether that attempt is worth retrying. See ADR 0002.
 package kafka
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
-	"github.com/confluentinc/confluent-kafka-go/v2/kafka"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
-// Producer wraps the underlying client with the platform's delivery semantics.
+// Producer is the franz-go backed Publisher.
+//
+// franz-go implements the Kafka protocol in pure Go, so this builds and tests with no C
+// toolchain and no platform-specific static libraries.
 type Producer struct {
-	producer *kafka.Producer
-	enabled  bool
-	timeout  time.Duration
+	client  *kgo.Client
+	enabled bool
+	timeout time.Duration
 }
+
+// compile-time proof that the concrete type satisfies the interface the relayer depends on.
+var _ Publisher = (*Producer)(nil)
 
 // NewProducer creates a producer configured for at-least-once, lossless delivery.
 //
-// Idempotence plus RequiredAcks=All means the broker acknowledges only once the record
-// is written to every in-sync replica. Without both, a leader failover between the ack and
-// the client's next read can silently lose a payment event.
-//
-// A single in-flight request per partition is enforced so the idempotent producer's
-// ordering guarantee holds.
+// Idempotence is enabled by default in franz-go, and combined with RequiredAcks=All it
+// means the broker acknowledges a record only once it is durable on every in-sync replica.
+// Without both, a leader failover between the acknowledgement and the client's next read
+// can silently lose a payment event.
 func NewProducer(brokers []string, clientID string, enabled bool, timeout time.Duration) (*Producer, error) {
 	if !enabled {
+		// A disabled producer still satisfies Publisher. Publishing becomes a no-op, so
+		// running without a broker never blocks the outbox.
 		return &Producer{enabled: false, timeout: timeout}, nil
 	}
 	if len(brokers) == 0 {
 		return nil, errors.New("no Kafka brokers configured")
 	}
 
-	cfg := &kafka.ConfigMap{
-		"bootstrap.servers": joinBrokers(brokers),
-		"client.id":         clientID,
+	client, err := kgo.NewClient(
+		kgo.SeedBrokers(brokers...),
+		kgo.ClientID(clientID),
 
-		// RequiredAcks=-1 means "all in-sync replicas". On the single-broker local stack
-		// this resolves to one replica; it becomes a real redundancy requirement as
-		// brokers are added.
-		"acks": "all",
+		// All in-sync replicas. On the single-broker local stack this resolves to one
+		// replica; it becomes a genuine redundancy requirement as brokers are added.
+		kgo.RequiredAcks(kgo.AllISRAcks()),
 
-		// Enables the producer idempotence protocol, which requires acks=all and a
-		// maximum of one in-flight request per partition.
-		"enable.idempotence": true,
+		// Bounds how long a broker stall can hold the relayer.
+		kgo.RecordDeliveryTimeout(timeout),
 
-		// Bounded so a broker stall cannot pin a relayer worker indefinitely.
-		"message.timeout.ms": int(timeout.Milliseconds()),
+		// Small linger so a batch of relayed events is sent as one request rather than one
+		// round-trip per message, without adding meaningful latency.
+		kgo.ProducerLinger(5*time.Millisecond),
 
-		// Deliver async and batch, then Flush on shutdown. Synchronous per-message
-		// delivery would make relaying a batch a sequence of broker round-trips.
-		"compression.type": "snappy",
-
-		"go.delivery.reports": true,
-	}
-
-	p, err := kafka.NewProducer(cfg)
+		// Auto topic creation stays disabled (franz-go's default). Topics are created
+		// explicitly by deploy/local/kafka/topics.sh so that a misspelled topic name fails
+		// loudly instead of silently producing a single-partition topic that serialises
+		// every event.
+	)
 	if err != nil {
-		return nil, fmt.Errorf("create kafka producer: %w", err)
+		return nil, err
 	}
 
-	return &Producer{producer: p, enabled: true, timeout: timeout}, nil
+	return &Producer{client: client, enabled: true, timeout: timeout}, nil
 }
 
-// Enabled reports whether publishing is active. When false, Publish succeeds without
-// contacting the broker so a disabled or unavailable Kafka never blocks the outbox.
+// Enabled reports whether publishing is active.
 func (p *Producer) Enabled() bool {
 	return p != nil && p.enabled
-}
-
-// PublishResult describes the outcome of a single delivery attempt.
-type PublishResult struct {
-	Partition int32
-	Offset    kafka.Offset
 }
 
 // Publish sends one message, blocking until the broker acknowledges it or the timeout
 // expires.
 //
-// The returned error is already classified by IsRetriable, so callers do not need to know
-// which librdkafka error codes mean "try again" and which mean "this will never work".
+// The key is the partition key: every event for one payment uses the payment id, so all of
+// that payment's events land on one partition and retain their relative order.
 func (p *Producer) Publish(ctx context.Context, topic, key string, value []byte, headers map[string]string) (PublishResult, error) {
 	if !p.enabled {
-		return PublishResult{}, nil
+		return PublishResult{Offset: unknownOffset}, nil
 	}
 
-	message := &kafka.Message{
-		TopicPartition: kafka.TopicPartition{Topic: &topic, Partition: kafka.PartitionAny},
-		Key:            []byte(key),
-		Value:          value,
-		Timestamp:      time.Now(),
+	record := &kgo.Record{
+		Topic:     topic,
+		Key:       []byte(key),
+		Value:     value,
+		Timestamp: time.Now(),
 	}
 	for name, headerValue := range headers {
-		message.Headers = append(message.Headers, kafka.Header{Key: name, Value: []byte(headerValue)})
+		record.Headers = append(record.Headers, kgo.RecordHeader{Key: name, Value: []byte(headerValue)})
 	}
 
-	// The context deadline bounds how long a broker stall can hold the caller, on top of
-	// message.timeout.ms, which the broker enforces independently.
-	publishCtx, cancel := context.WithTimeout(ctx, p.timeout)
-	defer cancel()
-
-	deliveryChan := make(chan kafka.Event, 1)
-	if err := p.producer.Produce(message, deliveryChan); err != nil {
+	// ProduceSync awaits the broker acknowledgement for exactly this record, which is what
+	// lets the relayer mark an outbox row PUBLISHED only once the event is genuinely durable.
+	results := p.client.ProduceSync(ctx, record)
+	producedRecord, err := results.First()
+	if err != nil {
 		return PublishResult{}, classify(err)
 	}
 
-	select {
-	case event := <-deliveryChan:
-		delivered, ok := event.(*kafka.Message)
-		if !ok {
-			return PublishResult{}, &TerminalError{Err: fmt.Errorf("unexpected delivery event %T", event)}
-		}
-		if delivered.TopicPartition.Error != nil {
-			return PublishResult{}, classify(delivered.TopicPartition.Error)
-		}
-		return PublishResult{
-			Partition: delivered.TopicPartition.Partition,
-			Offset:    delivered.TopicPartition.Offset,
-		}, nil
-
-	case <-publishCtx.Done():
-		return PublishResult{}, classify(publishCtx.Err())
-
-	case <-time.After(p.timeout):
-		return PublishResult{}, &RetriableError{Err: ErrPublishTimeout}
+	result := PublishResult{Offset: unknownOffset}
+	if producedRecord != nil {
+		result.Partition = producedRecord.Partition
+		// The record's offset is populated in place by ProduceSync when acks are required.
+		result.Offset = record.Offset
 	}
+	return result, nil
 }
 
-// Flush waits up to the timeout for buffered records to be delivered, returning the number
-// still undelivered.
+// Flush waits up to the timeout for buffered records to be delivered, returning how many
+// remain undelivered.
 func (p *Producer) Flush(timeout time.Duration) int {
-	if !p.enabled || p.producer == nil {
+	if !p.enabled || p.client == nil {
 		return 0
 	}
-	return p.producer.Flush(int(timeout.Milliseconds()))
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	if err := p.client.Flush(ctx); err != nil {
+		// A failed flush means records remain buffered. The exact count is not exposed by
+		// the client, so report 1 as "at least one undelivered" rather than claiming zero.
+		return 1
+	}
+	return 0
 }
 
-// Close shuts the producer down, discarding anything still buffered.
+// Close releases the client. Anything still buffered is discarded, which is why callers
+// must Flush before shutting down.
 func (p *Producer) Close() {
-	if p.enabled && p.producer != nil {
-		p.producer.Close()
+	if p.enabled && p.client != nil {
+		p.client.Close()
 	}
-}
-
-// IsRetriable reports whether an error represents a transient condition where the same
-// message may succeed later.
-//
-// This distinction is the whole basis of dead-letter routing: retrying a message that can
-// never be delivered blocks the outbox forever, while dead-lettering a message that could
-// have succeeded loses an event.
-//
-// librdkafka does expose Error.IsRetriable, but it is only populated for the
-// transactional producer API and is always false here, so the classification is done
-// explicitly against the error codes this deployment can actually encounter.
-func IsRetriable(err error) bool {
-	if err == nil {
-		return false
-	}
-
-	var terminal *TerminalError
-	if errors.As(err, &terminal) {
-		return false
-	}
-	var retriable *RetriableError
-	if errors.As(err, &retriable) {
-		return true
-	}
-
-	// ErrorCode has String() but not Error(), so it does not satisfy the error interface
-	// and cannot be targeted directly by errors.As. The kafka.Error interface is the
-	// supported way to reach the underlying code.
-	var kafkaErr kafka.Error
-	if errors.As(err, &kafkaErr) {
-		switch kafkaErr.Code() {
-		case kafka.ErrMsgTimedOut,
-			kafka.ErrTimedOut,
-			kafka.ErrTransport,
-			kafka.ErrResolve,
-			kafka.ErrBrokerNotAvailable,
-			kafka.ErrLeaderNotAvailable,
-			kafka.ErrNotLeaderForPartition,
-			kafka.ErrRequestTimedOut,
-			kafka.ErrNetworkException,
-			kafka.ErrAllBrokersDown,
-			kafka.ErrNotEnoughReplicas,
-			kafka.ErrNotEnoughReplicasAfterAppend,
-			kafka.ErrKafkaStorageError,
-			kafka.ErrReassignmentInProgress,
-			kafka.ErrUnknownTopicOrPart:
-			// ErrUnknownTopicOrPart is retriable on purpose: a relayer that starts before
-			// kafka-init has run will hit it, and it resolves once the topic exists. Such
-			// rows are only dead-lettered once MaxAttempts is exhausted.
-			return true
-
-		case kafka.ErrInvalidMsg,
-			kafka.ErrInvalidMsgSize,
-			kafka.ErrMsgSizeTooLarge,
-			kafka.ErrTopicAuthorizationFailed,
-			kafka.ErrGroupAuthorizationFailed,
-			kafka.ErrClusterAuthorizationFailed,
-			kafka.ErrTransactionalIDAuthorizationFailed,
-			kafka.ErrUnknownProducerID,
-			kafka.ErrTopicAlreadyExists,
-			kafka.ErrInvalidPartitions:
-			// Retrying these cannot help. An oversized or unauthorised message would loop
-			// forever and hold every later event behind it.
-			return false
-		}
-	}
-
-	// Context cancellation is not a broker condition and must not be retried by the
-	// relayer loop; the caller's shutdown handling decides what happens next.
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return false
-	}
-
-	return false
-}
-
-func classify(err error) error {
-	if err == nil {
-		return nil
-	}
-	if IsRetriable(err) {
-		return &RetriableError{Err: err}
-	}
-	return &TerminalError{Err: err}
-}
-
-func joinBrokers(brokers []string) string {
-	out := ""
-	for i, b := range brokers {
-		if i > 0 {
-			out += ","
-		}
-		out += b
-	}
-	return out
 }
