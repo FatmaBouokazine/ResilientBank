@@ -12,14 +12,22 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+
+	paymentsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/payments/v1"
 )
 
 // Fetches a single gauge or counter value from a Prometheus text endpoint.
@@ -174,7 +182,7 @@ func healthClass(s status) (string, string) {
 	}
 }
 
-func page(s status) string {
+func page(s status, payHTML string) string {
 	class, message := healthClass(s)
 
 	formatAge := func(sec float64) string {
@@ -225,6 +233,15 @@ func page(s status) string {
 <h2 style="margin-top:1.5em">Services</h2>
 <div class="row">%s Payment service (takes your money safely)</div>
 <div class="row">%s Delivery worker (tells everyone about it)</div>
+<h2 style="margin-top:1.5em">Send a payment</h2>
+%s
+<form method="POST" action="/pay" style="background:white;border:1px solid #ddd;border-radius:8px;padding:1em 1.2em;display:grid;gap:0.7em;max-width:420px">
+  <label>From account<br><input name="from" value="acc-alice" required style="width:100%%;padding:0.4em"></label>
+  <label>To account<br><input name="to" value="acc-bob" required style="width:100%%;padding:0.4em"></label>
+  <label>Amount (cents)<br><input name="amount" value="5000" required pattern="[0-9]+" style="width:100%%;padding:0.4em"></label>
+  <label>Currency<br><input name="currency" value="EUR" required maxlength="3" style="width:100%%;padding:0.4em"></label>
+  <button type="submit" style="padding:0.6em;background:#1a73e8;color:white;border:none;border-radius:6px;font-size:1em;cursor:pointer">Send payment</button>
+</form>
 <div class="foot">Numbers come straight from the running system. Kill the broker and watch "waiting" grow, then drain to zero on recovery.</div>
 </body>
 </html>`,
@@ -236,19 +253,45 @@ func page(s status) string {
 		formatAge(s.BacklogOldestSec),
 		s.DeadLettered,
 		dot(s.APIUp), dot(s.RelayerUp),
+		payHTML,
 	)
+}
+
+// payResult renders the outcome of the last submitted payment, if any.
+func payResultHTML(ok bool, id, errMsg string) string {
+	if id == "" && errMsg == "" {
+		return ""
+	}
+	if ok {
+		return fmt.Sprintf(`<div class="banner ok" style="margin-bottom:1em">Payment recorded: <b>%s</b></div>`, id)
+	}
+	return fmt.Sprintf(`<div class="banner down" style="margin-bottom:1em">Payment failed: %s</div>`, errMsg)
 }
 
 func main() {
 	api := envOr("PAYMENTS_METRICS", "http://localhost:2112/metrics")
 	relayer := envOr("RELAYER_METRICS", "http://localhost:2113/metrics")
+	grpcAddr := envOr("PAYMENTS_GRPC", "localhost:50051")
 	addr := envOr("DASHBOARD_ADDR", ":2114")
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, page(collect(api, relayer)))
+		var payHTML string
+		if id := r.URL.Query().Get("paid"); id != "" {
+			payHTML = payResultHTML(true, id, "")
+		} else if msg := r.URL.Query().Get("err"); msg != "" {
+			payHTML = payResultHTML(false, "", msg)
+		}
+		fmt.Fprint(w, page(collect(api, relayer), payHTML))
+	})
+	http.HandleFunc("/pay", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Redirect(w, r, "/", http.StatusSeeOther)
+			return
+		}
+		handlePay(w, r, grpcAddr, logger)
 	})
 	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -266,4 +309,66 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// handlePay accepts the payment form and forwards it to the payment service over gRPC.
+//
+// Each submission gets a fresh idempotency key so every click is a genuinely new payment.
+// To demonstrate duplicate handling, submit twice quickly is unnecessary: the smoke suite
+// covers that path. This form is for creating visible traffic, not for testing idempotency.
+func handlePay(w http.ResponseWriter, r *http.Request, grpcAddr string, logger *slog.Logger) {
+	if err := r.ParseForm(); err != nil {
+		redirectErr(w, r, "could not read the form")
+		return
+	}
+
+	from := strings.TrimSpace(r.FormValue("from"))
+	to := strings.TrimSpace(r.FormValue("to"))
+	amount, err := strconv.ParseInt(strings.TrimSpace(r.FormValue("amount")), 10, 64)
+	currency := strings.ToUpper(strings.TrimSpace(r.FormValue("currency")))
+	if from == "" || to == "" || err != nil || amount <= 0 || len(currency) != 3 {
+		redirectErr(w, r, "fill every field: distinct accounts, a positive amount, a 3-letter currency")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	conn, err := grpc.DialContext(ctx, grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		logger.Warn("dashboard could not reach the payment service", "addr", grpcAddr, "error", err)
+		redirectErr(w, r, "payment service is not reachable (is `make run` up?)")
+		return
+	}
+	defer conn.Close()
+
+	client := paymentsv1.NewPaymentServiceClient(conn)
+	resp, err := client.CreatePayment(ctx, &paymentsv1.CreatePaymentRequest{
+		IdempotencyKey: "dashboard-" + uuid.New().String(),
+		FromAccount:    from,
+		ToAccount:      to,
+		AmountCents:    amount,
+		Currency:       currency,
+	})
+	if err != nil {
+		logger.Warn("CreatePayment failed", "error", err)
+		redirectErr(w, r, "the payment was rejected: "+grpcMessage(err))
+		return
+	}
+
+	http.Redirect(w, r, "/?paid="+url.QueryEscape(resp.GetPaymentId()), http.StatusSeeOther)
+}
+
+func redirectErr(w http.ResponseWriter, r *http.Request, msg string) {
+	http.Redirect(w, r, "/?err="+url.QueryEscape(msg), http.StatusSeeOther)
+}
+
+// grpcMessage extracts the human-readable part of a gRPC error.
+func grpcMessage(err error) string {
+	msg := err.Error()
+	// Trim the "rpc error: code = X desc = " prefix down to the description.
+	if idx := strings.Index(msg, "desc = "); idx >= 0 {
+		return msg[idx+len("desc = "):]
+	}
+	return msg
 }
