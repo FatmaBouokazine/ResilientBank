@@ -95,6 +95,19 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  # Adminer: database admin panel. Login with System=PostgreSQL, Server=postgres,
+  # Username=resilient, Password=resilient, Database=payments.
+  # No credentials are baked in beyond the local dev defaults already in this file.
+  adminer:
+    image: adminer:4.8.1
+    container_name: rb-adminer
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
   # Grafana with provisioned datasource and dashboards. Anonymous access is enabled for
   # local demonstration; a real deployment puts authentication in front of this.
   grafana:
