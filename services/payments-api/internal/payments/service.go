@@ -50,14 +50,14 @@ func NewService(db *pgxpool.Pool, redisClient *redis.Client, cfg *config.Config,
 // CreatePayment executes payment ingestion with two-layer idempotency.
 //
 // WHY TWO LAYERS:
-// 1. Redis is the fast path (performance layer): It absorbs duplicate requests in
-//    sub-millisecond time directly from memory, preventing unnecessary database load
-//    during rapid client retries or network rebroadcasts.
-// 2. PostgreSQL UNIQUE constraint is the real guarantee (durability/correctness layer):
-//    If Redis is down, partitioned, degraded, restarting, or has evicted keys, or if two
-//    identical requests arrive concurrently at the exact same millisecond, the PostgreSQL
-//    UNIQUE constraint on idempotency_key prevents double-inserts and ensures ACID consistency.
-//    A slow or unavailable Redis must never block payment processing.
+//  1. Redis is the fast path (performance layer): It absorbs duplicate requests in
+//     sub-millisecond time directly from memory, preventing unnecessary database load
+//     during rapid client retries or network rebroadcasts.
+//  2. PostgreSQL UNIQUE constraint is the real guarantee (durability/correctness layer):
+//     If Redis is down, partitioned, degraded, restarting, or has evicted keys, or if two
+//     identical requests arrive concurrently at the exact same millisecond, the PostgreSQL
+//     UNIQUE constraint on idempotency_key prevents double-inserts and ensures ACID consistency.
+//     A slow or unavailable Redis must never block payment processing.
 func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePaymentRequest) (*paymentsv1.CreatePaymentResponse, error) {
 	start := time.Now()
 	defer func() {
@@ -138,6 +138,21 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	// catch-all for every early return below.
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
+	// 4a. Lock both accounts and enforce the transfer rules BEFORE anything is written.
+	//
+	// The lock must precede the payment insert: two concurrent transfers from one account
+	// must serialise on the balance row, or both could observe sufficient funds and
+	// overdraw it. Locking in id order prevents opposite-direction pairs deadlocking.
+	fromAcct, toAcct, lockErr := lockAccounts(dbCtx, tx, req.FromAccount, req.ToAccount)
+	if lockErr != nil {
+		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
+		return nil, transferError(lockErr)
+	}
+	if err := validateTransfer(fromAcct, toAcct, req.AmountCents, req.Currency); err != nil {
+		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
+		return nil, transferError(err)
+	}
+
 	// created_at is returned by the database rather than read from the Go clock, so the
 	// event's occurred_at and the payment row it describes can never disagree.
 	var createdAt time.Time
@@ -208,6 +223,36 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 			return nil, status.Error(codes.Unavailable, "database unavailable")
 		}
 
+		// 5b. Move the value and write its double-entry pair, in the same transaction.
+		//
+		// The balances, the ledger, the payment, and the outbox commit together or not at
+		// all. A payment without its ledger entries would create money from nothing; ledger
+		// entries without their payment would describe a transfer that never happened.
+		if err := applyTransfer(dbCtx, tx, newID, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency, createdAt); err != nil {
+			s.logger.ErrorContext(ctx, "ledger transfer failed; rolling back payment",
+				"idempotency_key", req.IdempotencyKey,
+				"error", err,
+			)
+			metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+			metrics.PaymentsTotal.WithLabelValues("error").Inc()
+			return nil, status.Error(codes.Unavailable, "database unavailable")
+		}
+
+		// 5c. Audit the creation. Best-effort within the transaction: if the audit row
+		// cannot be written, the payment must not commit either, because an unaudited
+		// movement is a compliance defect, not a successful payment.
+		if err := recordAudit(dbCtx, tx, "payment", newID, "created", "api",
+			fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
+				req.IdempotencyKey, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency)); err != nil {
+			s.logger.ErrorContext(ctx, "audit write failed; rolling back payment",
+				"idempotency_key", req.IdempotencyKey,
+				"error", err,
+			)
+			metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+			metrics.PaymentsTotal.WithLabelValues("error").Inc()
+			return nil, status.Error(codes.Unavailable, "database unavailable")
+		}
+
 		finalPaymentID = newID
 		metrics.PaymentsTotal.WithLabelValues("created").Inc()
 	} else {
@@ -267,6 +312,25 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	}, nil
 }
 
+// transferError maps a domain transfer failure to the gRPC status the client sees.
+//
+// Each of these is a distinct business outcome the caller must handle differently: a
+// missing account is a caller bug, insufficient funds is a retryable user condition, and a
+// frozen account needs human intervention. Collapsing them into one code would force
+// clients to parse message strings.
+func transferError(err error) error {
+	switch {
+	case errors.Is(err, ErrAccountNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrInsufficientFunds):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrAccountFrozen), errors.Is(err, ErrCurrencyMismatch):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+}
+
 // GetPayment retrieves a payment record by its unique ID.
 func (s *Service) GetPayment(ctx context.Context, req *paymentsv1.GetPaymentRequest) (*paymentsv1.GetPaymentResponse, error) {
 	if req == nil {
@@ -289,7 +353,7 @@ func (s *Service) GetPayment(ctx context.Context, req *paymentsv1.GetPaymentRequ
 
 	var (
 		id, fromAccount, toAccount, currency, statusStr string
-		amountCents                                      int64
+		amountCents                                     int64
 		createdAt                                       time.Time
 	)
 

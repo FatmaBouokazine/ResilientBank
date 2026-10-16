@@ -96,6 +96,12 @@ migrate-down:
 migrate-status:
 	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate status
 
+# Funds the demo accounts. Idempotent: safe to re-run, never alters existing balances.
+# Required after migrating a fresh database, otherwise every transfer fails for
+# insufficient funds. Production funds accounts through deposits, never through this.
+seed:
+	docker exec -i rb-postgres psql -v ON_ERROR_STOP=1 -U resilient -d payments < scripts/seed-demo-accounts.sql
+
 # Single command for a working local stack, for developers who are not using a migration
 # runner in their own workflow. Waits for Postgres to report healthy before migrating so
 # the first developer to clone does not hit a connection race.
