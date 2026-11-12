@@ -50,6 +50,11 @@ message PaymentEvent {
   // to distinguish an upstream producer from a replayed or bridged message.
   string producer = 8;
 
+  // Region the aggregate state described by this event belongs to, e.g. "A" or "B".
+  // Set by the producing region's payment service so a replica in another region can
+  // route and reconcile replicated events without needing a second source of truth.
+  string region = 9;
+
   // Event-specific body. Exactly one field is set. Numeric tags start at 100 to leave
   // room for future envelope additions without disturbing the payload.
   oneof payload {

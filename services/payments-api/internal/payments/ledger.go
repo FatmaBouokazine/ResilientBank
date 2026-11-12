@@ -43,7 +43,7 @@ var (
 //
 // Locks are always taken in id order so two transfers between the same pair in opposite
 // directions cannot deadlock each other waiting on reversed lock order.
-func lockAccounts(ctx context.Context, tx pgx.Tx, fromID, toID string) (from, to Account, err error) {
+func lockAccounts(ctx context.Context, tx pgx.Tx, region, fromID, toID string) (from, to Account, err error) {
 	first, second := fromID, toID
 	if second < first {
 		first, second = second, first
@@ -52,10 +52,10 @@ func lockAccounts(ctx context.Context, tx pgx.Tx, fromID, toID string) (from, to
 	rows, err := tx.Query(ctx, `
 		SELECT id, holder_name, currency, balance_cents, status
 		FROM accounts
-		WHERE id = ANY($1)
+		WHERE id = ANY($1) AND region = $2
 		ORDER BY id
 		FOR UPDATE
-	`, []string{first, second})
+	`, []string{first, second}, region)
 	if err != nil {
 		return Account{}, Account{}, fmt.Errorf("lock accounts: %w", err)
 	}
@@ -109,26 +109,27 @@ func validateTransfer(from, to Account, amountCents int64, currency string) erro
 // The two UPDATEs and the two INSERTs commit atomically with the payment row itself. A
 // crash at any point leaves either everything or nothing, which is the only way a ledger
 // stays balanced: a debit without its credit is not a partial transfer, it is corruption.
-func applyTransfer(ctx context.Context, tx pgx.Tx, paymentID string, fromID, toID string, amountCents int64, currency string, at time.Time) error {
+func applyTransfer(ctx context.Context, tx pgx.Tx, region, paymentID string, fromID, toID string, amountCents int64, currency string, at time.Time) error {
 	if _, err := tx.Exec(ctx,
-		`UPDATE accounts SET balance_cents = balance_cents - $1, updated_at = now() WHERE id = $2`,
-		amountCents, fromID); err != nil {
+		`UPDATE accounts SET balance_cents = balance_cents - $1, updated_at = now() WHERE id = $2 AND region = $3`,
+		amountCents, fromID, region); err != nil {
 		return fmt.Errorf("debit %s: %w", fromID, err)
 	}
 	if _, err := tx.Exec(ctx,
-		`UPDATE accounts SET balance_cents = balance_cents + $1, updated_at = now() WHERE id = $2`,
-		amountCents, toID); err != nil {
+		`UPDATE accounts SET balance_cents = balance_cents + $1, updated_at = now() WHERE id = $2 AND region = $3`,
+		amountCents, toID, region); err != nil {
 		return fmt.Errorf("credit %s: %w", toID, err)
 	}
 
 	debitID := uuid.New().String()
 	creditID := uuid.New().String()
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO ledger_entries (id, payment_id, account_id, direction, amount_cents, currency, created_at)
-		VALUES ($1, $2, $3, 'DEBIT', $4, $5, $6),
-		       ($7, $2, $8, 'CREDIT', $4, $5, $6)`,
-		debitID, paymentID, fromID, amountCents, currency, at,
-		creditID, toID); err != nil {
+		INSERT INTO ledger_entries (id, payment_id, account_id, direction, amount_cents, currency, region, created_at)
+		VALUES ($1, $2, $3, 'DEBIT', $4, $5, $6, $7),
+		       ($8, $2, $9, 'CREDIT', $4, $5, $6, $7)`,
+		debitID, paymentID, fromID, amountCents, currency, region, at,
+		creditID, toID, amountCents, currency, region, at,
+	); err != nil {
 		return fmt.Errorf("write ledger pair: %w", err)
 	}
 	return nil

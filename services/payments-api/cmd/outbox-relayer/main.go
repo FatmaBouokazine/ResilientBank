@@ -51,8 +51,8 @@ func run(logger *slog.Logger) error {
 	logger.Info("starting outbox-relayer",
 		"kafka_brokers", cfg.Kafka.Brokers,
 		"kafka_enabled", cfg.Kafka.Enabled,
-		"topic", cfg.Kafka.TopicEvents,
-		"dlq_topic", cfg.Kafka.TopicDLQ,
+		"topic", outbox.TopicFor(cfg.Kafka.TopicEvents, cfg.Region),
+		"dlq_topic", outbox.TopicDLQFor(cfg.Kafka.TopicEvents, cfg.Region),
 		"batch_size", cfg.Kafka.PollBatchSize,
 		"poll_interval", cfg.Kafka.PollInterval,
 		"max_attempts", cfg.Kafka.MaxAttempts,
@@ -137,6 +137,9 @@ func outboxConfig(cfg *config.Config) outbox.RelayerConfig {
 	relay := outbox.DefaultRelayerConfig()
 	relay.Topic = cfg.Kafka.TopicEvents
 	relay.TopicDLQ = cfg.Kafka.TopicDLQ
+	relay.Region = cfg.Region
+	relay.ReplicationEnabled = cfg.Kafka.ReplicationEnabled
+	relay.ReplicationTargetRegion = cfg.Kafka.ReplicationTargetRegion
 	relay.BatchSize = cfg.Kafka.PollBatchSize
 	relay.PollInterval = cfg.Kafka.PollInterval
 	relay.MaxAttempts = cfg.Kafka.MaxAttempts

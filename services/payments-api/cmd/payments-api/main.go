@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -15,6 +19,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/health"
 	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/reflection"
@@ -23,6 +29,33 @@ import (
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/config"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/payments"
 )
+
+// grpcCredentials builds the gRPC server credentials for the payment service. When a
+// TLS certificate/key pair is configured it is used for transport security; when mTLS is
+// required the server demands and verifies client certificates against the configured CA.
+func grpcCredentials(cfg *config.Config) (credentials.TransportCredentials, error) {
+	if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
+		return insecure.NewCredentials(), nil
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load TLS certificate/key: %w", err)
+	}
+	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
+	if cfg.RequireMTLS {
+		caPool := x509.NewCertPool()
+		caPEM, caErr := os.ReadFile(cfg.TLSCAFile)
+		if caErr != nil {
+			return nil, fmt.Errorf("read TLS CA: %w", caErr)
+		}
+		if pemBlock, pemErr := pem.Decode(caPEM); pemErr == nil && pemBlock != nil {
+			caPool.AppendCertsFromPEM(pemBlock.Bytes)
+		}
+		tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
+		tlsConf.ClientCAs = caPool
+	}
+	return credentials.NewTLS(tlsConf), nil
+}
 
 func main() {
 	// Initialize structured JSON logging
@@ -36,6 +69,10 @@ func main() {
 		"grpc_addr", cfg.GRPCAddr,
 		"metrics_addr", cfg.MetricsAddr,
 		"redis_addr", cfg.RedisAddr,
+		"tls_cert", cfg.TLSCertFile,
+		"require_mtls", cfg.RequireMTLS,
+		"vault_enabled", cfg.VaultEnabled,
+		"vault_addr", cfg.VaultAddr,
 	)
 
 	// Configure and connect to PostgreSQL
@@ -102,7 +139,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcCreds, err := grpcCredentials(cfg)
+	if err != nil {
+		logger.Error("failed to build gRPC TLS credentials", "error", err)
+		os.Exit(1)
+	}
+	grpcServer := grpc.NewServer(grpc.Creds(grpcCreds))
 
 	// Register payments service handler
 	paymentService := payments.NewService(dbPool, redisClient, cfg, logger)
