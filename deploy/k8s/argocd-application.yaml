@@ -19,6 +19,8 @@ spec:
   destinations:
     - namespace: resilientbank
       server: https://kubernetes.default.svc
+    - namespace: resilientbank-b
+      server: https://kubernetes.default.svc
   # clusterResourceWhitelist is deliberately omitted. An absent list DENIES every
   # cluster-scoped resource, which is the posture we want: ArgoCD owns one namespace, and
   # the argocd namespace is applied by Terraform. Giving ArgoCD cluster-scoped write
@@ -36,8 +38,8 @@ spec:
   project: resilientbank
   source:
     repoURL: https://github.com/FatmaBouokazine/ResilientBank.git
-    targetRevision: feat/phase2-step4-kafka-topics
-    path: deploy/k8s/app
+    targetRevision: feat/argocd-region-b
+    path: deploy/k8s/overlays/region-a
   destination:
     server: https://kubernetes.default.svc
     namespace: resilientbank
@@ -50,6 +52,40 @@ spec:
       - CreateNamespace=false
       # Honour the sync-wave annotations so the migration Job completes before the
       # Deployments roll. Without this the application would start against an empty schema.
+      - RespectWaveDeletions=false
+    retry:
+      limit: 5
+      backoff:
+        duration: 10s
+        factor: 2
+        maxDuration: 3m
+---
+# Region B is a separate Application because it is a separate set of live objects. It
+# deploys the same base through the region-b overlay, so a change to the application
+# manifests reaches both regions without a second copy in git. Terraform owns the
+# namespace and its ConfigMap; ArgoCD only owns the workloads inside it.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: resilientbank-b
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: resilientbank
+  source:
+    repoURL: https://github.com/FatmaBouokazine/ResilientBank.git
+    targetRevision: feat/argocd-region-b
+    path: deploy/k8s/overlays/region-b
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: resilientbank-b
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: false
+    syncOptions:
+      - CreateNamespace=false
       - RespectWaveDeletions=false
     retry:
       limit: 5
