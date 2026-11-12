@@ -117,6 +117,18 @@ func experiments() map[string]chaos.Experiment {
 			Duration:   20 * time.Second,
 			SettleTime: 15 * time.Second,
 		},
+		// KRaft leader loss: the broker that owns partition leadership is stopped, forcing
+		// leader re-election when it returns. Mechanically this is a kill, but it is kept as
+		// its own experiment because the guarantee under test is specifically that a
+		// leadership change loses no committed payment and does not strand the outbox.
+		"kafka-leader-loss": {
+			Name:       "kafka-leader-loss",
+			Kind:       chaos.FaultKill,
+			Target:     chaos.TargetDocker,
+			Subject:    "rb-kafka",
+			Duration:   30 * time.Second,
+			SettleTime: 30 * time.Second,
+		},
 		// The relay is the component whose failure the outbox is designed to absorb.
 		"relayer-kill": {
 			Name:       "relayer-kill",
