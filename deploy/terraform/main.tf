@@ -79,14 +79,38 @@ variable "app_version" {
   default     = "latest"
 }
 
+variable "region" {
+  description = "Primary region identifier, written to the app ConfigMap as REGION."
+  type        = string
+  default     = "A"
+}
+
+variable "enable_region_b" {
+  description = "Also create the Region B namespace and ConfigMap in the same cluster."
+  type        = bool
+  default     = true
+}
+
+variable "region_b_namespace" {
+  description = "Namespace for the Region B payment services instance."
+  type        = string
+  default     = "resilientbank-b"
+}
+
+variable "kafka_replication_enabled" {
+  description = "Forward each region's committed events to the peer region's topic."
+  type        = bool
+  default     = true
+}
+
 # The platforms' own health gate. A resource is only marked healthy once the application
 # reports ready, so a rollout that compiles but cannot serve traffic is treated as failed.
 resource "kubernetes_namespace" "app" {
   metadata {
     name = var.app_namespace
     labels = {
-      "app.kubernetes.io/part-of"    = "resilientbank"
-      "resilientbank.io/managed-by"  = "terraform"
+      "app.kubernetes.io/part-of"   = "resilientbank"
+      "resilientbank.io/managed-by" = "terraform"
     }
   }
 }
@@ -123,12 +147,67 @@ resource "kubernetes_config_map" "app" {
     KAFKA_ENABLED        = "true"
     OUTBOX_POLL_INTERVAL = "500ms"
     OUTBOX_BATCH_SIZE    = "100"
+
+    # Region identity and replication. Each region publishes to its own topic-scoped
+    # stream and, when replication is on, forwards committed events to the peer region.
+    REGION                          = upper(var.region)
+    KAFKA_REPLICATION_ENABLED       = tostring(var.kafka_replication_enabled)
+    KAFKA_REPLICATION_TARGET_REGION = lower(var.region) == "a" ? "b" : "a"
+  }
+}
+
+# Region B is a second, independent instance of the same stack. It gets its own namespace
+# and ConfigMap, publishes to its own region-scoped topics, and replicates the other way
+# (B -> A). Keeping it in the same state is deliberate: a single `terraform apply`
+# produces the two-region topology the dual-region replication tests exercise.
+resource "kubernetes_namespace" "app_b" {
+  count = var.enable_region_b ? 1 : 0
+
+  metadata {
+    name = var.region_b_namespace
+    labels = {
+      "app.kubernetes.io/part-of"   = "resilientbank"
+      "resilientbank.io/region"     = "B"
+      "resilientbank.io/managed-by" = "terraform"
+    }
+  }
+}
+
+resource "kubernetes_config_map" "app_b" {
+  count = var.enable_region_b ? 1 : 0
+
+  metadata {
+    name      = "resilientbank-config"
+    namespace = kubernetes_namespace.app_b[0].metadata[0].name
+  }
+
+  data = {
+    GRPC_ADDR    = ":50051"
+    METRICS_ADDR = ":2112"
+
+    DATABASE_URL         = "postgres://resilient:resilient@postgres-b:5432/payments?sslmode=disable"
+    REDIS_ADDR           = "redis-b:6379"
+    KAFKA_BROKERS        = "kafka-b:29092"
+    KAFKA_TOPIC_EVENTS   = "payments.events.v1"
+    KAFKA_TOPIC_DLQ      = "payments.events.v1.dlq"
+    KAFKA_ENABLED        = "true"
+    OUTBOX_POLL_INTERVAL = "500ms"
+    OUTBOX_BATCH_SIZE    = "100"
+
+    REGION                          = "B"
+    KAFKA_REPLICATION_ENABLED       = tostring(var.kafka_replication_enabled)
+    KAFKA_REPLICATION_TARGET_REGION = lower(var.region) == "a" ? "a" : "b"
   }
 }
 
 output "app_namespace" {
   description = "Namespace the application is deployed into."
   value       = kubernetes_namespace.app.metadata[0].name
+}
+
+output "region_b_namespace" {
+  description = "Namespace of the Region B instance, or null when disabled."
+  value       = var.enable_region_b ? kubernetes_namespace.app_b[0].metadata[0].name : null
 }
 
 output "argocd_namespace" {
