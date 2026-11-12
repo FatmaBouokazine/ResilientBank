@@ -31,10 +31,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	eventsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/events/v1"
 	paymentsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/payments/v1"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/config"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/outbox"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/payments"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 const defaultTestDatabaseURL = "postgres://resilient:resilient@localhost:5432/payments?sslmode=disable"
@@ -53,6 +55,13 @@ func (discardRedisLogger) Printf(_ context.Context, _ string, _ ...interface{}) 
 // path these tests are about. It also exercises the documented guarantee that a
 // dead cache must never block or fail a payment.
 func setup(t *testing.T) (*payments.Service, *pgxpool.Pool) {
+	t.Helper()
+	return setupInRegion(t, "A")
+}
+
+// setupInRegion is setup with the service's region configurable, so tests can stand a
+// replica in one region and feed it events originating in another.
+func setupInRegion(t *testing.T, region string) (*payments.Service, *pgxpool.Pool) {
 	t.Helper()
 
 	redis.SetLogger(discardRedisLogger{})
@@ -108,8 +117,7 @@ func setup(t *testing.T) (*payments.Service, *pgxpool.Pool) {
 	cfg := config.Load()
 	cfg.DatabaseURL = databaseURL
 	cfg.DBTimeout = 10 * time.Second
-	// Pin the region so key-scoping assertions do not depend on the ambient environment.
-	cfg.Region = "A"
+	cfg.Region = region
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := payments.NewService(pool, redisClient, cfg, logger)
@@ -204,6 +212,89 @@ func TestNewPaymentCommitsPaymentAndOutboxRow(t *testing.T) {
 	}
 	if got := countRows(t, pool, "outbox", key); got != 1 {
 		t.Errorf("outbox rows = %d, want 1", got)
+	}
+}
+
+// A locally created payment is audited in the region that performed the action, with no
+// origin region: it did not arrive from anywhere else.
+func TestLocalPaymentAuditRecordsRegion(t *testing.T) {
+	svc, pool := setup(t)
+	ctx := context.Background()
+	key := "it-audit-local-" + uuid.New().String()
+
+	resp, err := svc.CreatePayment(ctx, newRequest(t, key, 1000))
+	if err != nil {
+		t.Fatalf("CreatePayment: %v", err)
+	}
+
+	var region string
+	var origin *string
+	err = pool.QueryRow(ctx,
+		`SELECT region, origin_region FROM audit_log
+		 WHERE entity_type='payment' AND entity_id=$1 AND action='created'`,
+		resp.GetPaymentId()).Scan(&region, &origin)
+	if err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if region != "A" {
+		t.Errorf("audit region = %q, want A", region)
+	}
+	if origin != nil {
+		t.Errorf("origin_region = %v, want NULL for a local payment", *origin)
+	}
+}
+
+// A replicated payment is audited in the region that applied it, with the originating
+// region recorded alongside it. That pair is the cross-region link compliance needs:
+// where the write happened, and where it came from.
+func TestReplicatedPaymentAuditLinksOriginRegion(t *testing.T) {
+	svc, pool := setupInRegion(t, "B")
+	ctx := context.Background()
+	key := "it-audit-repl-" + uuid.New().String()
+	paymentID := uuid.New().String()
+	now := time.Now().UTC()
+
+	event := &eventsv1.PaymentEvent{
+		EventId:       uuid.New().String(),
+		EventType:     "payment.created",
+		EventVersion:  1,
+		OccurredAt:    timestamppb.New(now),
+		CorrelationId: payments.RegionScopedKey("A", key),
+		AggregateType: "payment",
+		AggregateId:   paymentID,
+		Producer:      "payments-api",
+		Region:        "A",
+		Payload: &eventsv1.PaymentEvent_PaymentCreated{
+			PaymentCreated: &eventsv1.PaymentCreated{
+				PaymentId:   paymentID,
+				FromAccount: "acc-alice",
+				ToAccount:   "acc-bob",
+				AmountCents: 1000,
+				Currency:    "EUR",
+				Status:      "ACCEPTED",
+				CreatedAt:   timestamppb.New(now),
+			},
+		},
+	}
+
+	if err := svc.ApplyReplicatedPayment(ctx, event); err != nil {
+		t.Fatalf("ApplyReplicatedPayment: %v", err)
+	}
+
+	var region string
+	var origin string
+	err := pool.QueryRow(ctx,
+		`SELECT region, origin_region FROM audit_log
+		 WHERE entity_type='payment' AND entity_id=$1 AND action='created'`,
+		paymentID).Scan(&region, &origin)
+	if err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if region != "B" {
+		t.Errorf("audit region = %q, want B (the applying region)", region)
+	}
+	if origin != "A" {
+		t.Errorf("origin_region = %q, want A (the source region)", origin)
 	}
 }
 

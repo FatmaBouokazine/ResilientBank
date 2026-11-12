@@ -273,7 +273,7 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 		// 5c. Audit the creation. Best-effort within the transaction: if the audit row
 		// cannot be written, the payment must not commit either, because an unaudited
 		// movement is a compliance defect, not a successful payment.
-		if err := recordAudit(dbCtx, tx, "payment", newID, "created", "api",
+		if err := recordAudit(dbCtx, tx, "payment", newID, "created", "api", s.cfg.Region, "",
 			fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
 				scopedKey, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency)); err != nil {
 			s.logger.ErrorContext(ctx, "audit write failed; rolling back payment",
@@ -429,7 +429,7 @@ func (s *Service) ApplyReplicatedPayment(ctx context.Context, event *eventsv1.Pa
 		return status.Error(codes.Unavailable, "database unavailable")
 	}
 
-	if err := recordAudit(dbCtx, tx, "payment", ref.PaymentID, "created", ref.Region, fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
+	if err := recordAudit(dbCtx, tx, "payment", ref.PaymentID, "created", "replication", s.cfg.Region, ref.Region, fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
 		ref.CorrelationID, ref.FromAccount, ref.ToAccount, ref.AmountCents, ref.Currency)); err != nil {
 		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
 		metrics.PaymentsTotal.WithLabelValues("error").Inc()

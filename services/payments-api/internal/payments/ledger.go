@@ -136,11 +136,11 @@ func applyTransfer(ctx context.Context, tx pgx.Tx, region, paymentID string, fro
 }
 
 // recordAudit appends one row to the immutable audit trail.
-func recordAudit(ctx context.Context, tx pgx.Tx, entityType, entityID, action, actor, details string) error {
+func recordAudit(ctx context.Context, tx pgx.Tx, entityType, entityID, action, actor, region, originRegion, details string) error {
 	if _, err := tx.Exec(ctx, `
-		INSERT INTO audit_log (entity_type, entity_id, action, actor, details)
-		VALUES ($1, $2, $3, $4, $5::jsonb)`,
-		entityType, entityID, action, actor, details); err != nil {
+		INSERT INTO audit_log (entity_type, entity_id, action, actor, region, origin_region, details)
+		VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7::jsonb)`,
+		entityType, entityID, action, actor, region, originRegion, details); err != nil {
 		return fmt.Errorf("audit %s %s: %w", action, entityID, err)
 	}
 	return nil
