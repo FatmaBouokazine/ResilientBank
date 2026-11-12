@@ -185,9 +185,9 @@ resource "kubernetes_config_map" "app_b" {
     GRPC_ADDR    = ":50051"
     METRICS_ADDR = ":2112"
 
-    DATABASE_URL         = "postgres://resilient:resilient@postgres-b:5432/payments?sslmode=disable"
-    REDIS_ADDR           = "redis-b:6379"
-    KAFKA_BROKERS        = "kafka-b:29092"
+    DATABASE_URL         = "postgres://resilient:resilient@postgres:5432/payments?sslmode=disable"
+    REDIS_ADDR           = "redis:6379"
+    KAFKA_BROKERS        = "kafka:29092"
     KAFKA_TOPIC_EVENTS   = "payments.events.v1"
     KAFKA_TOPIC_DLQ      = "payments.events.v1.dlq"
     KAFKA_ENABLED        = "true"
