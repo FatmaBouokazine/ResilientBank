@@ -1,4 +1,4 @@
-.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke loadgen soak tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
+.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke loadgen soak demo tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -62,6 +62,7 @@ help:
 	@echo "Full local Docker stack:"
 	@echo "  make up-all               start infra, migrations, services, and dashboard"
 	@echo "  make up-fresh             start clean full stack (drops old data)"
+	@echo "  make demo                 narrated end-to-end demo, including a Kafka kill"
 	@echo ""
 	@echo "Kubernetes / Terraform / ArgoCD:"
 	@echo "  make tf-init              initialize terraform working directory"
@@ -175,6 +176,11 @@ up-all:
 
 up-fresh:
 	$(BASH) scripts/docker-up.sh --fresh
+
+# Narrated, non-destructive demonstration of the three resilience claims. Requires the
+# stack to be up (`make up-all`) unless the script is called with --up.
+demo:
+	$(BASH) scripts/demo.sh
 
 # --- Kubernetes / Terraform / ArgoCD -------------------------------------------
 # K8S_TARGET is the cluster these targets operate on. Point it at a dev cluster only.
