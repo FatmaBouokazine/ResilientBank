@@ -108,6 +108,8 @@ func setup(t *testing.T) (*payments.Service, *pgxpool.Pool) {
 	cfg := config.Load()
 	cfg.DatabaseURL = databaseURL
 	cfg.DBTimeout = 10 * time.Second
+	// Pin the region so key-scoping assertions do not depend on the ambient environment.
+	cfg.Region = "A"
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	svc := payments.NewService(pool, redisClient, cfg, logger)
@@ -168,12 +170,15 @@ func countRows(t *testing.T, pool *pgxpool.Pool, table, idemKey string) int {
 
 	var n int
 	var err error
+	// The service stores the client key namespaced by region. The harness pins region A,
+	// so the assertion has to look up the same scoped value the write used.
+	scopedKey := payments.RegionScopedKey("A", idemKey)
 	if table == "payments" {
-		err = pool.QueryRow(ctx, `SELECT count(*) FROM payments WHERE idempotency_key=$1`, idemKey).Scan(&n)
+		err = pool.QueryRow(ctx, `SELECT count(*) FROM payments WHERE idempotency_key=$1`, scopedKey).Scan(&n)
 	} else {
 		// outbox.aggregate_id is TEXT by design so the relayer can stage events for
 		// aggregates that are not yet UUID-backed; cast the payment id to match.
-		err = pool.QueryRow(ctx, `SELECT count(*) FROM outbox o JOIN payments p ON p.id::text = o.aggregate_id WHERE p.idempotency_key=$1`, idemKey).Scan(&n)
+		err = pool.QueryRow(ctx, `SELECT count(*) FROM outbox o JOIN payments p ON p.id::text = o.aggregate_id WHERE p.idempotency_key=$1`, scopedKey).Scan(&n)
 	}
 	if err != nil {
 		t.Fatalf("count %s: %v", table, err)
@@ -332,8 +337,8 @@ func TestStagedPayloadMatchesContract(t *testing.T) {
 	if event.GetPaymentCreated().GetPaymentId() != resp.GetPaymentId() {
 		t.Errorf("payload payment_id = %q, want %q", event.GetPaymentCreated().GetPaymentId(), resp.GetPaymentId())
 	}
-	if event.GetCorrelationId() != key {
-		t.Errorf("correlation_id = %q, want the idempotency key %q", event.GetCorrelationId(), key)
+	if want := payments.RegionScopedKey("A", key); event.GetCorrelationId() != want {
+		t.Errorf("correlation_id = %q, want the region-scoped idempotency key %q", event.GetCorrelationId(), want)
 	}
 	if got := event.GetPaymentCreated().GetAmountCents(); got != 4200 {
 		t.Errorf("amount_cents = %d, want 4200", got)

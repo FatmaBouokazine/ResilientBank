@@ -244,8 +244,8 @@ func TestRelayerPublishesCommittedPayment(t *testing.T) {
 	if event.GetPaymentCreated().GetPaymentId() != resp.GetPaymentId() {
 		t.Errorf("published payment_id = %q, want %q", event.GetPaymentCreated().GetPaymentId(), resp.GetPaymentId())
 	}
-	if event.GetCorrelationId() != key {
-		t.Errorf("correlation_id = %q, want the idempotency key %q", event.GetCorrelationId(), key)
+	if want := payments.RegionScopedKey("A", key); event.GetCorrelationId() != want {
+		t.Errorf("correlation_id = %q, want the region-scoped idempotency key %q", event.GetCorrelationId(), want)
 	}
 
 	// Operators and DLQ tooling read these headers; consumers use the envelope.
@@ -519,11 +519,13 @@ func storeAttempts(t *testing.T, pool *pgxpool.Pool, keyPrefix string) int {
 	defer cancel()
 
 	var n int
+	// Stored keys are region-namespaced; the harness pins region A.
+	scopedPrefix := payments.RegionScopedKey("A", keyPrefix)
 	err := pool.QueryRow(ctx, `
 		SELECT COALESCE(MAX(o.attempts), 0)
 		FROM outbox o
 		JOIN payments p ON p.id::text = o.aggregate_id
-		WHERE p.idempotency_key LIKE $1`, keyPrefix+"%").Scan(&n)
+		WHERE p.idempotency_key LIKE $1`, scopedPrefix+"%").Scan(&n)
 	if err != nil {
 		t.Fatalf("read attempts for %s: %v", keyPrefix, err)
 	}
