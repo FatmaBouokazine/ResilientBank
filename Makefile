@@ -1,4 +1,4 @@
-.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
+.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke loadgen soak tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
 # or broken even when Git for Windows is installed. Override to point at Git Bash:
@@ -55,6 +55,8 @@ help:
 	@echo "  make test                 unit tests (race detector)"
 	@echo "  make integration          atomicity and relay tests against a real database"
 	@echo "  make smoke                end-to-end gRPC and event smoke suite"
+	@echo "  make loadgen              sustained load test with p95/p99 and error SLO gates"
+	@echo "  make soak                 five-minute soak run against the same SLOs"
 	@echo "  make tlc                  run TLA+ model checker for Raft consensus"
 	@echo ""
 	@echo "Full local Docker stack:"
@@ -150,6 +152,17 @@ integration:
 
 smoke:
 	$(BASH) scripts/smoke-test.sh
+
+# Sustained load against a running stack. Exits non-zero when p95/p99 latency or the error
+# rate exceed their SLOs, so this is a gate and not just a report. Requires
+# `make up migrate seed` and the API to be running.
+loadgen:
+	cd services/payments-api && go run ./cmd/loadgen
+
+# Five minutes at a steady rate: long enough for leaks, connection exhaustion and outbox
+# growth to surface, which a thirty-second burst cannot show.
+soak:
+	cd services/payments-api && go run ./cmd/loadgen -duration 5m -warmup 15s -workers 32 -rate 400
 
 # Formal verification with TLC
 tlc:
