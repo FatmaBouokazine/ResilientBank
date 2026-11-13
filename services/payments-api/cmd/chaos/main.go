@@ -135,6 +135,29 @@ func experiments() map[string]chaos.Experiment {
 			Duration:   15 * time.Second,
 			SettleTime: 20 * time.Second,
 		},
+		// Kubernetes backend: the payment ingestion deployment is the platform's own
+		// service, so its failure modes are the ones the durability guarantees care about
+		// most. The kubectl backend deletes the pod and waits for its controller to
+		// reschedule, which is the recovery the experiment is asserting.
+		"k8s-payments-api-kill": {
+			Name:       "k8s-payments-api-kill",
+			Kind:       chaos.FaultKill,
+			Target:     chaos.TargetKubernetes,
+			Subject:    "resilientbank/payments-api",
+			Duration:   20 * time.Second,
+			SettleTime: 30 * time.Second,
+		},
+		// Kubernetes backend: network isolation of the same deployment, expressed with a
+		// stock deny-all NetworkPolicy rather than a raw tc rule. A partition lets
+		// connections hang until they time out, which the client must survive.
+		"k8s-payments-api-partition": {
+			Name:       "k8s-payments-api-partition",
+			Kind:       chaos.FaultPartition,
+			Target:     chaos.TargetKubernetes,
+			Subject:    "resilientbank/app.kubernetes.io/name=payments-api",
+			Duration:   20 * time.Second,
+			SettleTime: 15 * time.Second,
+		},
 	}
 }
 
