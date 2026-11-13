@@ -8,13 +8,13 @@ import (
 )
 
 var (
-	ErrEmptyIdempotencyKey     = errors.New("idempotency_key cannot be empty")
-	ErrIdempotencyKeyTooLong   = errors.New("idempotency_key exceeds maximum length of 128 characters")
-	ErrInvalidAmount           = errors.New("amount_cents must be strictly greater than 0")
-	ErrInvalidCurrency         = errors.New("currency must be exactly 3 uppercase letters (ISO 4217)")
-	ErrEmptyFromAccount        = errors.New("from_account cannot be empty")
-	ErrEmptyToAccount          = errors.New("to_account cannot be empty")
-	ErrIdenticalAccounts       = errors.New("from_account and to_account must be different")
+	ErrEmptyIdempotencyKey   = errors.New("idempotency_key cannot be empty")
+	ErrIdempotencyKeyTooLong = errors.New("idempotency_key exceeds maximum length of 128 characters")
+	ErrInvalidAmount         = errors.New("amount_cents must be strictly greater than 0")
+	ErrInvalidCurrency       = errors.New("currency must be exactly 3 uppercase letters (ISO 4217)")
+	ErrEmptyFromAccount      = errors.New("from_account cannot be empty")
+	ErrEmptyToAccount        = errors.New("to_account cannot be empty")
+	ErrIdenticalAccounts     = errors.New("from_account and to_account must be different")
 )
 
 // ValidateCreatePaymentRequest validates the incoming payment against domain constraints:

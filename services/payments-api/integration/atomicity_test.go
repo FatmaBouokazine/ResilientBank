@@ -77,7 +77,7 @@ func setup(t *testing.T) (*payments.Service, *pgxpool.Pool) {
 	}
 
 	// Fail loudly rather than with a confusing "relation does not exist" later on.
-	for _, table := range []string{"payments", "outbox"} {
+	for _, table := range []string{"payments", "outbox", "accounts", "ledger_entries"} {
 		var exists bool
 		if err := pool.QueryRow(ctx,
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema='public' AND table_name=$1)`,
@@ -87,9 +87,14 @@ func setup(t *testing.T) (*payments.Service, *pgxpool.Pool) {
 		}
 		if !exists {
 			pool.Close()
-			t.Fatalf("table %q does not exist; apply deploy/local/migrations (make reset && make up)", table)
+			t.Fatalf("table %q does not exist; apply the migrations (make migrate)", table)
 		}
 	}
+
+	// Seed the accounts every transfer test needs. TRUNCATE between tests wipes them, so
+	// they are recreated here rather than assumed. Balances are generous so amount
+	// assertions test logic, not arithmetic against a small pot.
+	seedAccounts(t, pool)
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:         "127.0.0.1:1", // intentionally closed
@@ -116,12 +121,32 @@ func setup(t *testing.T) (*payments.Service, *pgxpool.Pool) {
 }
 
 // truncate isolates each test so ordering never masks a leaked row.
+//
+// Order matters: ledger_entries references payments, so it truncates first. Accounts are
+// wiped too and recreated by seedAccounts, so no test inherits another test's balances.
 func truncate(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if _, err := pool.Exec(ctx, `TRUNCATE outbox, payments`); err != nil {
+	if _, err := pool.Exec(ctx, `TRUNCATE audit_log, settlement_items, reversals, ledger_entries, outbox, payments, accounts`); err != nil {
 		t.Logf("cleanup: truncate failed: %v", err)
+	}
+}
+
+// seedAccounts recreates the transfer accounts with known balances.
+func seedAccounts(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO accounts (id, holder_name, currency, balance_cents, status) VALUES
+		    ('acc-alice', 'Alice Doe', 'EUR', 100000, 'ACTIVE'),
+		    ('acc-bob',   'Bob Smith', 'EUR',  50000, 'ACTIVE'),
+		    ('acc-carol', 'Carol Jones', 'USD', 200000, 'ACTIVE'),
+		    ('acc-dave',  'Dave Brown',  'USD',  75000, 'ACTIVE')
+		ON CONFLICT (id) DO NOTHING`); err != nil {
+		t.Fatalf("seed accounts: %v", err)
 	}
 }
 

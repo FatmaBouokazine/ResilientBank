@@ -45,6 +45,7 @@ type PaymentRef struct {
 	Status        string
 	CorrelationID string
 	CreatedAt     time.Time
+	Region        string
 }
 
 // NewEventID returns a unique identifier for a single event instance.
@@ -74,6 +75,7 @@ func BuildPaymentCreated(ref PaymentRef, eventID string) *eventsv1.PaymentEvent 
 		AggregateType: AggregateTypePayment,
 		AggregateId:   ref.PaymentID,
 		Producer:      ProducerPaymentsAPI,
+		Region:        ref.Region,
 		Payload: &eventsv1.PaymentEvent_PaymentCreated{
 			PaymentCreated: &eventsv1.PaymentCreated{
 				PaymentId:   ref.PaymentID,

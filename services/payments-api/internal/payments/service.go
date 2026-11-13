@@ -16,9 +16,11 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	eventsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/events/v1"
 	paymentsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/payments/v1"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/config"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/metrics"
+	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/opa"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/outbox"
 )
 
@@ -35,29 +37,36 @@ type Service struct {
 	redis  *redis.Client
 	cfg    *config.Config
 	logger *slog.Logger
+	opa    *opa.Client
 }
 
 // NewService constructs a new payment service handler.
 func NewService(db *pgxpool.Pool, redisClient *redis.Client, cfg *config.Config, logger *slog.Logger) *Service {
+	opaClient, err := opa.New(context.Background(), cfg)
+	if err != nil {
+		logger.Error("failed to initialize OPA policy client", "error", err)
+	}
+
 	return &Service{
 		db:     db,
 		redis:  redisClient,
 		cfg:    cfg,
 		logger: logger,
+		opa:    opaClient,
 	}
 }
 
 // CreatePayment executes payment ingestion with two-layer idempotency.
 //
 // WHY TWO LAYERS:
-// 1. Redis is the fast path (performance layer): It absorbs duplicate requests in
-//    sub-millisecond time directly from memory, preventing unnecessary database load
-//    during rapid client retries or network rebroadcasts.
-// 2. PostgreSQL UNIQUE constraint is the real guarantee (durability/correctness layer):
-//    If Redis is down, partitioned, degraded, restarting, or has evicted keys, or if two
-//    identical requests arrive concurrently at the exact same millisecond, the PostgreSQL
-//    UNIQUE constraint on idempotency_key prevents double-inserts and ensures ACID consistency.
-//    A slow or unavailable Redis must never block payment processing.
+//  1. Redis is the fast path (performance layer): It absorbs duplicate requests in
+//     sub-millisecond time directly from memory, preventing unnecessary database load
+//     during rapid client retries or network rebroadcasts.
+//  2. PostgreSQL UNIQUE constraint is the real guarantee (durability/correctness layer):
+//     If Redis is down, partitioned, degraded, restarting, or has evicted keys, or if two
+//     identical requests arrive concurrently at the exact same millisecond, the PostgreSQL
+//     UNIQUE constraint on idempotency_key prevents double-inserts and ensures ACID consistency.
+//     A slow or unavailable Redis must never block payment processing.
 func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePaymentRequest) (*paymentsv1.CreatePaymentResponse, error) {
 	start := time.Now()
 	defer func() {
@@ -68,6 +77,24 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	if err := ValidateCreatePaymentRequest(req); err != nil {
 		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
 		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	// OPA policy guardrail for payment mutations (Sprint 7).
+	if s.opa != nil {
+		allowed, reason, err := s.opa.Allow(ctx, map[string]any{
+			"operation":       "payment.create",
+			"amount_cents":    req.AmountCents,
+			"from_account":    req.FromAccount,
+			"to_account":      req.ToAccount,
+			"idempotency_key": req.IdempotencyKey,
+		})
+		if err != nil {
+			return nil, status.Error(codes.Internal, fmt.Sprintf("opa policy evaluation failed: %v", err))
+		}
+		if !allowed {
+			metrics.PaymentsTotal.WithLabelValues("denied").Inc()
+			return nil, status.Error(codes.PermissionDenied, reason)
+		}
 	}
 
 	// 2. Compute request fingerprint
@@ -138,6 +165,21 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	// catch-all for every early return below.
 	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
 
+	// 4a. Lock both accounts and enforce the transfer rules BEFORE anything is written.
+	//
+	// The lock must precede the payment insert: two concurrent transfers from one account
+	// must serialise on the balance row, or both could observe sufficient funds and
+	// overdraw it. Locking in id order prevents opposite-direction pairs deadlocking.
+	fromAcct, toAcct, lockErr := lockAccounts(dbCtx, tx, s.cfg.Region, req.FromAccount, req.ToAccount)
+	if lockErr != nil {
+		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
+		return nil, transferError(lockErr)
+	}
+	if err := validateTransfer(fromAcct, toAcct, req.AmountCents, req.Currency); err != nil {
+		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
+		return nil, transferError(err)
+	}
+
 	// created_at is returned by the database rather than read from the Go clock, so the
 	// event's occurred_at and the payment row it describes can never disagree.
 	var createdAt time.Time
@@ -173,6 +215,7 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 			Status:        "ACCEPTED",
 			CorrelationID: req.IdempotencyKey,
 			CreatedAt:     createdAt,
+			Region:        s.cfg.Region,
 		}
 		event := outbox.BuildPaymentCreated(ref, outbox.NewEventID())
 
@@ -202,6 +245,36 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 			s.logger.ErrorContext(ctx, "outbox insert failed; rolling back payment",
 				"idempotency_key", req.IdempotencyKey,
 				"error", outboxErr,
+			)
+			metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+			metrics.PaymentsTotal.WithLabelValues("error").Inc()
+			return nil, status.Error(codes.Unavailable, "database unavailable")
+		}
+
+		// 5b. Move the value and write its double-entry pair, in the same transaction.
+		//
+		// The balances, the ledger, the payment, and the outbox commit together or not at
+		// all. A payment without its ledger entries would create money from nothing; ledger
+		// entries without their payment would describe a transfer that never happened.
+		if err := applyTransfer(dbCtx, tx, s.cfg.Region, newID, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency, createdAt); err != nil {
+			s.logger.ErrorContext(ctx, "ledger transfer failed; rolling back payment",
+				"idempotency_key", req.IdempotencyKey,
+				"error", err,
+			)
+			metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+			metrics.PaymentsTotal.WithLabelValues("error").Inc()
+			return nil, status.Error(codes.Unavailable, "database unavailable")
+		}
+
+		// 5c. Audit the creation. Best-effort within the transaction: if the audit row
+		// cannot be written, the payment must not commit either, because an unaudited
+		// movement is a compliance defect, not a successful payment.
+		if err := recordAudit(dbCtx, tx, "payment", newID, "created", "api",
+			fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
+				req.IdempotencyKey, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency)); err != nil {
+			s.logger.ErrorContext(ctx, "audit write failed; rolling back payment",
+				"idempotency_key", req.IdempotencyKey,
+				"error", err,
 			)
 			metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
 			metrics.PaymentsTotal.WithLabelValues("error").Inc()
@@ -267,6 +340,169 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	}, nil
 }
 
+// ApplyReplicatedPayment applies a payment.created event delivered through cross-region
+// replication. It is idempotent on the payment identifier, so a region applying the same
+// replicated event twice never moves value twice.
+func (s *Service) ApplyReplicatedPayment(ctx context.Context, event *eventsv1.PaymentEvent) error {
+	if event == nil {
+		return nil
+	}
+
+	var created *eventsv1.PaymentCreated
+	switch payload := event.Payload.(type) {
+	case *eventsv1.PaymentEvent_PaymentCreated:
+		created = payload.PaymentCreated
+	}
+	if created == nil {
+		return nil
+	}
+
+	ref := outbox.PaymentRef{
+		PaymentID:     event.AggregateId,
+		FromAccount:   created.FromAccount,
+		ToAccount:     created.ToAccount,
+		AmountCents:   created.AmountCents,
+		Currency:      created.Currency,
+		Status:        created.Status,
+		CorrelationID: event.GetCorrelationId(),
+		CreatedAt:     created.GetCreatedAt().AsTime(),
+		Region:        event.GetRegion(),
+	}
+
+	existing, err := s.paymentByCorrelation(ctx, ref.CorrelationID)
+	if err != nil {
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+	if existing != nil {
+		return nil
+	}
+
+	dbCtx, cancel := context.WithTimeout(ctx, s.cfg.DBTimeout)
+	defer cancel()
+
+	tx, err := s.db.Begin(dbCtx)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "failed to begin transaction", "error", err)
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+	defer func() { _ = tx.Rollback(context.WithoutCancel(ctx)) }()
+
+	fromAcct, toAcct, lockErr := lockAccounts(dbCtx, tx, ref.Region, ref.FromAccount, ref.ToAccount)
+	if lockErr != nil {
+		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
+		return transferError(lockErr)
+	}
+	if err := validateTransfer(fromAcct, toAcct, ref.AmountCents, ref.Currency); err != nil {
+		metrics.PaymentsTotal.WithLabelValues("invalid").Inc()
+		return transferError(err)
+	}
+
+	insertQuery := `
+		INSERT INTO payments (id, idempotency_key, request_hash, from_account, to_account, amount_cents, currency, status, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (idempotency_key) DO NOTHING
+		RETURNING created_at
+	`
+	var createdAt time.Time
+	if err := tx.QueryRow(dbCtx, insertQuery,
+		ref.PaymentID, ref.CorrelationID, ComputeRequestHash(ref.FromAccount, ref.ToAccount, ref.AmountCents, ref.Currency),
+		ref.FromAccount, ref.ToAccount, ref.AmountCents, ref.Currency, ref.Status, ref.CreatedAt,
+	).Scan(&createdAt); err != nil {
+		s.logger.ErrorContext(ctx, "replicated payment insert failed", "error", err)
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+
+	if err := applyTransfer(dbCtx, tx, ref.Region, ref.PaymentID, ref.FromAccount, ref.ToAccount, ref.AmountCents, ref.Currency, createdAt); err != nil {
+		s.logger.ErrorContext(ctx, "replicated ledger transfer failed", "error", err)
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+
+	if err := recordAudit(dbCtx, tx, "payment", ref.PaymentID, "created", ref.Region, fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
+		ref.CorrelationID, ref.FromAccount, ref.ToAccount, ref.AmountCents, ref.Currency)); err != nil {
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+
+	if commitErr := tx.Commit(dbCtx); commitErr != nil {
+		s.logger.ErrorContext(ctx, "replicated payment commit failed", "error", commitErr)
+		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
+		metrics.PaymentsTotal.WithLabelValues("error").Inc()
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+
+	return nil
+}
+
+// replicatedPayment is the locally recorded state of a payment looked up by correlation id.
+type replicatedPayment struct {
+	id          string
+	fromAccount string
+	toAccount   string
+	amountCents int64
+	currency    string
+	status      string
+	createdAt   time.Time
+}
+
+// paymentByCorrelation returns the locally recorded payment for the given idempotency key.
+func (s *Service) paymentByCorrelation(ctx context.Context, correlationID string) (*replicatedPayment, error) {
+	dbCtx, cancel := context.WithTimeout(ctx, s.cfg.DBTimeout)
+	defer cancel()
+	var (
+		id          string
+		fromAccount string
+		toAccount   string
+		amountCents int64
+		currency    string
+		status      string
+		createdAt   time.Time
+	)
+	err := s.db.QueryRow(dbCtx, `SELECT id, from_account, to_account, amount_cents, currency, status, created_at FROM payments WHERE idempotency_key = $1`, correlationID).Scan(&id, &fromAccount, &toAccount, &amountCents, &currency, &status, &createdAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &replicatedPayment{
+		id:          id,
+		fromAccount: fromAccount,
+		toAccount:   toAccount,
+		amountCents: amountCents,
+		currency:    currency,
+		status:      status,
+		createdAt:   createdAt,
+	}, nil
+}
+
+// transferError maps a domain transfer failure to the gRPC status the client sees.
+//
+// Each of these is a distinct business outcome the caller must handle differently: a
+// missing account is a caller bug, insufficient funds is a retryable user condition, and a
+// frozen account needs human intervention. Collapsing them into one code would force
+// clients to parse message strings.
+func transferError(err error) error {
+	switch {
+	case errors.Is(err, ErrAccountNotFound):
+		return status.Error(codes.NotFound, err.Error())
+	case errors.Is(err, ErrInsufficientFunds):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, ErrAccountFrozen), errors.Is(err, ErrCurrencyMismatch):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	default:
+		return status.Error(codes.Unavailable, "database unavailable")
+	}
+}
+
 // GetPayment retrieves a payment record by its unique ID.
 func (s *Service) GetPayment(ctx context.Context, req *paymentsv1.GetPaymentRequest) (*paymentsv1.GetPaymentResponse, error) {
 	if req == nil {
@@ -289,7 +525,7 @@ func (s *Service) GetPayment(ctx context.Context, req *paymentsv1.GetPaymentRequ
 
 	var (
 		id, fromAccount, toAccount, currency, statusStr string
-		amountCents                                      int64
+		amountCents                                     int64
 		createdAt                                       time.Time
 	)
 

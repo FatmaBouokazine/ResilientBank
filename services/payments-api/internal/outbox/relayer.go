@@ -11,6 +11,22 @@ import (
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/metrics"
 )
 
+// TopicFor returns the events topic for the given region. The default region keeps the
+// legacy topic name; other regions get a region-qualified suffix so each region owns its
+// own event stream for cross-region replication.
+func TopicFor(topic, region string) string {
+	if region == "" || region == "A" {
+		return topic
+	}
+	return topic + "." + region
+}
+
+// TopicDLQFor returns the dead-letter topic for the given region, derived from the
+// region-scoped events topic.
+func TopicDLQFor(topic, region string) string {
+	return TopicFor(topic, region) + ".dlq"
+}
+
 // Relayer drains the outbox to Kafka.
 //
 // It runs as a separate process from the payment API so that broker latency, producer
@@ -31,6 +47,17 @@ type RelayerConfig struct {
 	Topic string
 	// TopicDLQ receives events that must not be retried.
 	TopicDLQ string
+
+	// Region identifies the region this relayer serves. Region-scoped topics are used for
+	// cross-region replication; the default region keeps the legacy topic names.
+	Region string
+
+	// ReplicationEnabled forwards committed events from this region's stream to the
+	// configured replica region.
+	ReplicationEnabled bool
+
+	// ReplicationTargetRegion is the region committed events are replicated to, e.g. "B".
+	ReplicationTargetRegion string
 
 	BatchSize int
 
@@ -77,9 +104,11 @@ func NewRelayer(store *Store, publisher rbkafka.Publisher, cfg RelayerConfig, lo
 // It returns nil on a clean shutdown. In-flight batches are finished before returning, so
 // a graceful stop never abandons a claimed row mid-publish.
 func (r *Relayer) Run(ctx context.Context) error {
+	eventsTopic := TopicFor(r.cfg.Topic, r.cfg.Region)
+	dlqTopic := TopicDLQFor(r.cfg.Topic, r.cfg.Region)
 	r.logger.Info("outbox relayer started",
-		"topic", r.cfg.Topic,
-		"dlq_topic", r.cfg.TopicDLQ,
+		"topic", eventsTopic,
+		"dlq_topic", dlqTopic,
 		"batch_size", r.cfg.BatchSize,
 		"poll_interval", r.cfg.PollInterval,
 		"max_attempts", r.cfg.MaxAttempts,
@@ -151,7 +180,7 @@ func (r *Relayer) handle(ctx context.Context, record Record) {
 	start := time.Now()
 	headers := r.buildHeaders(record)
 
-	_, publishErr := r.publisher.Publish(ctx, r.cfg.Topic, r.AggregateKey(record), record.Payload, headers)
+	_, publishErr := r.publisher.Publish(ctx, TopicFor(r.cfg.Topic, r.cfg.Region), r.AggregateKey(record), record.Payload, headers)
 	metrics.OutboxPublishDuration.Observe(time.Since(start).Seconds())
 
 	if publishErr == nil {
@@ -169,6 +198,20 @@ func (r *Relayer) handle(ctx context.Context, record Record) {
 			return
 		}
 		metrics.OutboxPublishedTotal.WithLabelValues("published").Inc()
+
+		if r.cfg.ReplicationEnabled && r.cfg.ReplicationTargetRegion != "" && (r.cfg.Region == "" || r.cfg.Region == "A") {
+			replTopic := TopicFor(r.cfg.Topic, r.cfg.ReplicationTargetRegion)
+			if _, replErr := r.publisher.Publish(ctx, replTopic, r.AggregateKey(record), record.Payload, headers); replErr != nil {
+				r.logger.WarnContext(ctx, "cross-region replication publish failed; source commit stands",
+					"outbox_id", record.ID,
+					"event_type", record.EventType,
+					"source_topic", TopicFor(r.cfg.Topic, r.cfg.Region),
+					"target_topic", replTopic,
+					"error", replErr,
+				)
+			}
+		}
+
 		return
 	}
 
@@ -217,11 +260,12 @@ func (r *Relayer) deadLetter(ctx context.Context, record Record, cause error, re
 	headers["x-dead-letter-attempts"] = fmt.Sprintf("%d", record.Attempts)
 
 	dlqKey := r.AggregateKey(record)
-	if _, err := r.publisher.Publish(ctx, r.cfg.TopicDLQ, dlqKey, record.Payload, headers); err != nil {
+	dlqTopic := TopicDLQFor(r.cfg.Topic, r.cfg.Region)
+	if _, err := r.publisher.Publish(ctx, dlqTopic, dlqKey, record.Payload, headers); err != nil {
 		metrics.OutboxDeadLetterTotal.WithLabelValues("publish_failed").Inc()
 		r.logger.ErrorContext(ctx, "failed to write to the dead-letter topic; leaving row PENDING for retry",
 			"outbox_id", record.ID,
-			"dlq_topic", r.cfg.TopicDLQ,
+			"dlq_topic", dlqTopic,
 			"reason", reason,
 			"error", err,
 		)

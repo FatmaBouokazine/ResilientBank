@@ -16,6 +16,25 @@ type Config struct {
 	IdempotencyTTL time.Duration
 	DBTimeout      time.Duration
 
+	// Region identifies this payment service instance, e.g. "A" or "B".
+	Region string
+
+	// TLS / mTLS settings for the gRPC listener (Sprint 7 security hardening).
+	TLSCertFile string
+	TLSKeyFile  string
+	TLSCAFile   string
+	RequireMTLS bool
+
+	// Vault settings for secret retrieval (Sprint 7 security hardening).
+	VaultEnabled    bool
+	VaultAddr       string
+	VaultSecretPath string
+
+	// OPA policy engine settings for payment mutation guardrails (Sprint 7).
+	OPAEnabled    bool
+	OPAAddress    string
+	OPAPolicyName string
+
 	// Kafka settings for the outbox relayer and its producer.
 	Kafka KafkaConfig
 }
@@ -55,18 +74,34 @@ type KafkaConfig struct {
 	MaxAttempts int
 	BackoffBase time.Duration
 	BackoffMax  time.Duration
+
+	// Replication forwards committed events from this region's stream to the replica
+	// region's stream.
+	ReplicationEnabled      bool
+	ReplicationTargetRegion string
 }
 
 // Load populates configuration from environment variables with sensible production defaults.
 func Load() *Config {
 	return &Config{
-		GRPCAddr:       getEnv("GRPC_ADDR", ":50051"),
-		MetricsAddr:    getEnv("METRICS_ADDR", ":2112"),
-		DatabaseURL:    getEnv("DATABASE_URL", "postgres://resilient:resilient@localhost:5432/payments?sslmode=disable"),
-		RedisAddr:      getEnv("REDIS_ADDR", "localhost:6379"),
-		IdempotencyTTL: getEnvDuration("IDEMPOTENCY_TTL", 24*time.Hour),
-		DBTimeout:      getEnvDuration("DB_TIMEOUT", 2*time.Second),
-		Kafka:          loadKafka(),
+		GRPCAddr:        getEnv("GRPC_ADDR", ":50051"),
+		MetricsAddr:     getEnv("METRICS_ADDR", ":2112"),
+		DatabaseURL:     getEnv("DATABASE_URL", "postgres://resilient:resilient@localhost:5432/payments?sslmode=disable"),
+		RedisAddr:       getEnv("REDIS_ADDR", "localhost:6379"),
+		IdempotencyTTL:  getEnvDuration("IDEMPOTENCY_TTL", 24*time.Hour),
+		DBTimeout:       getEnvDuration("DB_TIMEOUT", 2*time.Second),
+		Region:          getEnv("REGION", "A"),
+		TLSCertFile:     getEnv("TLS_CERT", ""),
+		TLSKeyFile:      getEnv("TLS_KEY", ""),
+		TLSCAFile:       getEnv("TLS_CA", ""),
+		RequireMTLS:     getEnvBool("REQUIRE_MTLS", false),
+		VaultEnabled:    getEnvBool("VAULT_ENABLED", false),
+		VaultAddr:       getEnv("VAULT_ADDR", ""),
+		VaultSecretPath: getEnv("VAULT_SECRET_PATH", ""),
+		OPAEnabled:      getEnvBool("OPA_ENABLED", false),
+		OPAAddress:      getEnv("OPA_ADDR", "localhost:8181"),
+		OPAPolicyName:   getEnv("OPA_POLICY_NAME", "resilientbank.payment/allow"),
+		Kafka:           loadKafka(),
 	}
 }
 
@@ -85,9 +120,11 @@ func loadKafka() KafkaConfig {
 		PollInterval:  getEnvDuration("OUTBOX_POLL_INTERVAL", 500*time.Millisecond),
 		PollBatchSize: getEnvInt("OUTBOX_BATCH_SIZE", 100),
 
-		MaxAttempts: getEnvInt("OUTBOX_MAX_ATTEMPTS", 10),
-		BackoffBase: getEnvDuration("OUTBOX_BACKOFF_BASE", time.Second),
-		BackoffMax:  getEnvDuration("OUTBOX_BACKOFF_MAX", 5*time.Minute),
+		MaxAttempts:             getEnvInt("OUTBOX_MAX_ATTEMPTS", 10),
+		BackoffBase:             getEnvDuration("OUTBOX_BACKOFF_BASE", time.Second),
+		BackoffMax:              getEnvDuration("OUTBOX_BACKOFF_MAX", 5*time.Minute),
+		ReplicationEnabled:      getEnvBool("KAFKA_REPLICATION_ENABLED", false),
+		ReplicationTargetRegion: getEnv("KAFKA_REPLICATION_TARGET_REGION", ""),
 	}
 }
 

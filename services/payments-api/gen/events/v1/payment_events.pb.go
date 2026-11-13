@@ -59,6 +59,10 @@ type PaymentEvent struct {
 	// Name of the service that produced the event, e.g. "payments-api". Allows consumers
 	// to distinguish an upstream producer from a replayed or bridged message.
 	Producer string `protobuf:"bytes,8,opt,name=producer,proto3" json:"producer,omitempty"`
+	// Region the aggregate state described by this event belongs to, e.g. "A" or "B".
+	// Set by the producing region's payment service so a replica in another region can
+	// route and reconcile replicated events without needing a second source of truth.
+	Region string `protobuf:"bytes,9,opt,name=region,proto3" json:"region,omitempty"`
 	// Event-specific body. Exactly one field is set. Numeric tags start at 100 to leave
 	// room for future envelope additions without disturbing the payload.
 	//
@@ -152,6 +156,13 @@ func (x *PaymentEvent) GetAggregateId() string {
 func (x *PaymentEvent) GetProducer() string {
 	if x != nil {
 		return x.Producer
+	}
+	return ""
+}
+
+func (x *PaymentEvent) GetRegion() string {
+	if x != nil {
+		return x.Region
 	}
 	return ""
 }
@@ -287,7 +298,7 @@ var File_events_v1_payment_events_proto protoreflect.FileDescriptor
 
 const file_events_v1_payment_events_proto_rawDesc = "" +
 	"\n" +
-	"\x1eevents/v1/payment_events.proto\x12\tevents.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x88\x03\n" +
+	"\x1eevents/v1/payment_events.proto\x12\tevents.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\xa0\x03\n" +
 	"\fPaymentEvent\x12\x19\n" +
 	"\bevent_id\x18\x01 \x01(\tR\aeventId\x12\x1d\n" +
 	"\n" +
@@ -298,7 +309,8 @@ const file_events_v1_payment_events_proto_rawDesc = "" +
 	"\x0ecorrelation_id\x18\x05 \x01(\tR\rcorrelationId\x12%\n" +
 	"\x0eaggregate_type\x18\x06 \x01(\tR\raggregateType\x12!\n" +
 	"\faggregate_id\x18\a \x01(\tR\vaggregateId\x12\x1a\n" +
-	"\bproducer\x18\b \x01(\tR\bproducer\x12D\n" +
+	"\bproducer\x18\b \x01(\tR\bproducer\x12\x16\n" +
+	"\x06region\x18\t \x01(\tR\x06region\x12D\n" +
 	"\x0fpayment_created\x18d \x01(\v2\x19.events.v1.PaymentCreatedH\x00R\x0epaymentCreatedB\t\n" +
 	"\apayload\"\x83\x02\n" +
 	"\x0ePaymentCreated\x12\x1d\n" +

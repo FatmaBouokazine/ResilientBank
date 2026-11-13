@@ -1,4 +1,4 @@
-.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
+.PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke loadgen soak demo tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
 
 # On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which fails if no distro is installed.
 # We auto-detect Git Bash if present, otherwise fallback to bash.
@@ -58,11 +58,14 @@ help:
 	@echo "  make test                 unit tests (race detector)"
 	@echo "  make integration          atomicity and relay tests against a real database"
 	@echo "  make smoke                end-to-end gRPC and event smoke suite"
+	@echo "  make loadgen              sustained load test with p95/p99 and error SLO gates"
+	@echo "  make soak                 five-minute soak run against the same SLOs"
 	@echo "  make tlc                  run TLA+ model checker for Raft consensus"
 	@echo ""
 	@echo "Full local Docker stack:"
 	@echo "  make up-all               start infra, migrations, services, and dashboard"
 	@echo "  make up-fresh             start clean full stack (drops old data)"
+	@echo "  make demo                 narrated end-to-end demo, including a Kafka kill"
 	@echo ""
 	@echo "Kubernetes / Terraform / ArgoCD:"
 	@echo "  make tf-init              initialize terraform working directory"
@@ -98,6 +101,12 @@ migrate-down:
 
 migrate-status:
 	cd services/payments-api && DATABASE_URL="$(DATABASE_URL)" go run ./cmd/migrate status
+
+# Funds the demo accounts. Idempotent: safe to re-run, never alters existing balances.
+# Required after migrating a fresh database, otherwise every transfer fails for
+# insufficient funds. Production funds accounts through deposits, never through this.
+seed:
+	docker exec -i rb-postgres psql -v ON_ERROR_STOP=1 -U resilient -d payments < scripts/seed-demo-accounts.sql
 
 # Single command for a working local stack, for developers who are not using a migration
 # runner in their own workflow. Waits for Postgres to report healthy before migrating so
@@ -148,6 +157,17 @@ integration:
 smoke:
 	$(BASH) scripts/smoke-test.sh
 
+# Sustained load against a running stack. Exits non-zero when p95/p99 latency or the error
+# rate exceed their SLOs, so this is a gate and not just a report. Requires
+# `make up migrate seed` and the API to be running.
+loadgen:
+	cd services/payments-api && go run ./cmd/loadgen
+
+# Five minutes at a steady rate: long enough for leaks, connection exhaustion and outbox
+# growth to surface, which a thirty-second burst cannot show.
+soak:
+	cd services/payments-api && go run ./cmd/loadgen -duration 5m -warmup 15s -workers 32 -rate 400
+
 # Formal verification with TLC
 tlc:
 	$(BASH) scripts/run-tlc.sh
@@ -159,6 +179,11 @@ up-all:
 
 up-fresh:
 	$(BASH) scripts/docker-up.sh --fresh
+
+# Narrated, non-destructive demonstration of the three resilience claims. Requires the
+# stack to be up (`make up-all`) unless the script is called with --up.
+demo:
+	$(BASH) scripts/demo.sh
 
 # --- Kubernetes / Terraform / ArgoCD -------------------------------------------
 # K8S_TARGET is the cluster these targets operate on. Point it at a dev cluster only.
