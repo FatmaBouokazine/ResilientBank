@@ -36,6 +36,7 @@ func main() {
 	if err := run(); err != nil {
 		var exit exitError
 		if errors.As(err, &exit) {
+			fmt.Fprintf(os.Stderr, "chaos: %v\n", exit.err)
 			os.Exit(exit.code)
 		}
 		fmt.Fprintf(os.Stderr, "chaos: %v\n", err)
