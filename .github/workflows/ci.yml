@@ -130,26 +130,33 @@ jobs:
           DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
         run: go run ./cmd/migrate up
 
-      - name: Run kafka-kill experiment with live traffic
+      - name: Run chaos experiments with live traffic
         working-directory: services/payments-api
         env:
           DATABASE_URL: postgres://resilient:resilient@localhost:5432/payments?sslmode=disable
         run: |
-          # Traffic must be committed DURING the fault. An empty outbox makes killing Kafka
-          # unobservable, and the experiment would pass while proving nothing.
-          go run ./cmd/payments-api &
-          API_PID=$!
-          sleep 8
-          go run ./cmd/chaos run kafka-kill --duration 15s &
-          CHAOS_PID=$!
-          sleep 5
-          for i in $(seq 1 8); do
-            grpcurl -plaintext -d "{\"idempotency_key\":\"ci-chaos-$i\",\"from_account\":\"acc-x\",\"to_account\":\"acc-y\",\"amount_cents\":1000,\"currency\":\"EUR\"}" \
-              localhost:50051 payments.v1.PaymentService/CreatePayment >/dev/null 2>&1 || true
-            sleep 1
+          # Every experiment runs against real traffic committed DURING the fault. An empty
+          # outbox makes a Kafka fault unobservable, and the experiment would pass while
+          # proving nothing. Each experiment gets a fresh API process and unique idempotency
+          # keys so one run cannot mask another.
+          for EXP in kafka-kill kafka-leader-loss; do
+            echo "::group::chaos $EXP"
+            go run ./cmd/payments-api &
+            API_PID=$!
+            sleep 8
+            go run ./cmd/chaos run "$EXP" --duration 15s &
+            CHAOS_PID=$!
+            sleep 5
+            for i in $(seq 1 8); do
+              grpcurl -plaintext -d "{\"idempotency_key\":\"ci-$EXP-$i\",\"from_account\":\"acc-x\",\"to_account\":\"acc-y\",\"amount_cents\":1000,\"currency\":\"EUR\"}" \
+                localhost:50051 payments.v1.PaymentService/CreatePayment >/dev/null 2>&1 || true
+              sleep 1
+            done
+            wait $CHAOS_PID
+            kill $API_PID 2>/dev/null || true
+            sleep 5
+            echo "::endgroup::"
           done
-          wait $CHAOS_PID
-          kill $API_PID 2>/dev/null || true
 
   proto:
     name: Protocol Buffers
