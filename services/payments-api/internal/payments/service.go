@@ -97,9 +97,13 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 		}
 	}
 
+	// Namespace the client's key by this region. The client keeps sending the same raw key;
+	// the stored key is what makes the same raw key in two regions two different payments.
+	scopedKey := RegionScopedKey(s.cfg.Region, req.IdempotencyKey)
+
 	// 2. Compute request fingerprint
 	requestHash := ComputeRequestHash(req.FromAccount, req.ToAccount, req.AmountCents, req.Currency)
-	redisKey := fmt.Sprintf("idem:%s", req.IdempotencyKey)
+	redisKey := fmt.Sprintf("idem:%s", scopedKey)
 
 	// 3. Redis fast path
 	val, err := s.redis.Get(ctx, redisKey).Result()
@@ -184,7 +188,7 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 	// event's occurred_at and the payment row it describes can never disagree.
 	var createdAt time.Time
 	err = tx.QueryRow(dbCtx, insertQuery,
-		newID, req.IdempotencyKey, requestHash, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency, "ACCEPTED",
+		newID, scopedKey, requestHash, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency, "ACCEPTED",
 	).Scan(&createdAt)
 
 	isNewPayment := err == nil
@@ -213,7 +217,7 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 			AmountCents:   req.AmountCents,
 			Currency:      req.Currency,
 			Status:        "ACCEPTED",
-			CorrelationID: req.IdempotencyKey,
+			CorrelationID: scopedKey,
 			CreatedAt:     createdAt,
 			Region:        s.cfg.Region,
 		}
@@ -269,9 +273,9 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 		// 5c. Audit the creation. Best-effort within the transaction: if the audit row
 		// cannot be written, the payment must not commit either, because an unaudited
 		// movement is a compliance defect, not a successful payment.
-		if err := recordAudit(dbCtx, tx, "payment", newID, "created", "api",
+		if err := recordAudit(dbCtx, tx, "payment", newID, "created", "api", s.cfg.Region, "",
 			fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
-				req.IdempotencyKey, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency)); err != nil {
+				scopedKey, req.FromAccount, req.ToAccount, req.AmountCents, req.Currency)); err != nil {
 			s.logger.ErrorContext(ctx, "audit write failed; rolling back payment",
 				"idempotency_key", req.IdempotencyKey,
 				"error", err,
@@ -288,7 +292,7 @@ func (s *Service) CreatePayment(ctx context.Context, req *paymentsv1.CreatePayme
 		// so the hash compared is provably the one that caused the conflict.
 		selectQuery := `SELECT id, request_hash FROM payments WHERE idempotency_key = $1`
 		var existingID, existingHash string
-		if queryErr := tx.QueryRow(dbCtx, selectQuery, req.IdempotencyKey).Scan(&existingID, &existingHash); queryErr != nil {
+		if queryErr := tx.QueryRow(dbCtx, selectQuery, scopedKey).Scan(&existingID, &existingHash); queryErr != nil {
 			s.logger.ErrorContext(ctx, "postgres existing record query failed",
 				"idempotency_key", req.IdempotencyKey,
 				"error", queryErr,
@@ -364,7 +368,7 @@ func (s *Service) ApplyReplicatedPayment(ctx context.Context, event *eventsv1.Pa
 		AmountCents:   created.AmountCents,
 		Currency:      created.Currency,
 		Status:        created.Status,
-		CorrelationID: event.GetCorrelationId(),
+		CorrelationID: EnsureRegionScoped(event.GetRegion(), event.GetCorrelationId()),
 		CreatedAt:     created.GetCreatedAt().AsTime(),
 		Region:        event.GetRegion(),
 	}
@@ -425,7 +429,7 @@ func (s *Service) ApplyReplicatedPayment(ctx context.Context, event *eventsv1.Pa
 		return status.Error(codes.Unavailable, "database unavailable")
 	}
 
-	if err := recordAudit(dbCtx, tx, "payment", ref.PaymentID, "created", ref.Region, fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
+	if err := recordAudit(dbCtx, tx, "payment", ref.PaymentID, "created", "replication", s.cfg.Region, ref.Region, fmt.Sprintf(`{"idempotency_key":%q,"from":%q,"to":%q,"amount_cents":%d,"currency":%q}`,
 		ref.CorrelationID, ref.FromAccount, ref.ToAccount, ref.AmountCents, ref.Currency)); err != nil {
 		metrics.DependencyErrorsTotal.WithLabelValues("postgres").Inc()
 		metrics.PaymentsTotal.WithLabelValues("error").Inc()

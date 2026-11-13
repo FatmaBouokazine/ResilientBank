@@ -2,11 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -28,33 +24,31 @@ import (
 	paymentsv1 "github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/gen/payments/v1"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/config"
 	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/payments"
+	"github.com/YOUR_GITHUB_USER/resilientbank/services/payments-api/internal/tlsreload"
 )
 
 // grpcCredentials builds the gRPC server credentials for the payment service. When a
 // TLS certificate/key pair is configured it is used for transport security; when mTLS is
 // required the server demands and verifies client certificates against the configured CA.
-func grpcCredentials(cfg *config.Config) (credentials.TransportCredentials, error) {
+//
+// The certificate, key and client CA are served through a reloader so a rotation is a file
+// replacement rather than a restart. A restart would interrupt payment ingestion, which is
+// exactly the availability the rotation is meant to protect.
+func grpcCredentials(cfg *config.Config, logger *slog.Logger) (credentials.TransportCredentials, *tlsreload.Reloader, error) {
 	if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
-		return insecure.NewCredentials(), nil
+		return insecure.NewCredentials(), nil, nil
 	}
-	cert, err := tls.LoadX509KeyPair(cfg.TLSCertFile, cfg.TLSKeyFile)
+	reloader, err := tlsreload.New(tlsreload.Options{
+		CertFile:    cfg.TLSCertFile,
+		KeyFile:     cfg.TLSKeyFile,
+		CAFile:      cfg.TLSCAFile,
+		RequireMTLS: cfg.RequireMTLS,
+		Logger:      logger,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("load TLS certificate/key: %w", err)
+		return nil, nil, err
 	}
-	tlsConf := &tls.Config{Certificates: []tls.Certificate{cert}}
-	if cfg.RequireMTLS {
-		caPool := x509.NewCertPool()
-		caPEM, caErr := os.ReadFile(cfg.TLSCAFile)
-		if caErr != nil {
-			return nil, fmt.Errorf("read TLS CA: %w", caErr)
-		}
-		if pemBlock, pemErr := pem.Decode(caPEM); pemErr == nil && pemBlock != nil {
-			caPool.AppendCertsFromPEM(pemBlock.Bytes)
-		}
-		tlsConf.ClientAuth = tls.RequireAndVerifyClientCert
-		tlsConf.ClientCAs = caPool
-	}
-	return credentials.NewTLS(tlsConf), nil
+	return credentials.NewTLS(reloader.TLSConfig()), reloader, nil
 }
 
 func main() {
@@ -139,10 +133,16 @@ func main() {
 		os.Exit(1)
 	}
 
-	grpcCreds, err := grpcCredentials(cfg)
+	grpcCreds, tlsReloader, err := grpcCredentials(cfg, logger)
 	if err != nil {
 		logger.Error("failed to build gRPC TLS credentials", "error", err)
 		os.Exit(1)
+	}
+	if tlsReloader != nil {
+		reloadCtx, reloadCancel := context.WithCancel(context.Background())
+		defer reloadCancel()
+		go tlsReloader.Start(reloadCtx)
+		logger.Info("TLS certificate auto-reload enabled", "interval", tlsreload.DefaultInterval.String())
 	}
 	grpcServer := grpc.NewServer(grpc.Creds(grpcCreds))
 
