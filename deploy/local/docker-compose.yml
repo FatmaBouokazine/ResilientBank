@@ -151,7 +151,9 @@ services:
   payments-api:
     image: resilientbank:dev
     container_name: rb-payments-api
-    command: ["/usr/local/bin/payments-api"]
+    # Explicit entrypoint: compose's `command` does NOT override the image ENTRYPOINT,
+    # so relying on the Dockerfile's default would run this binary everywhere.
+    entrypoint: ["/usr/local/bin/payments-api"]
     ports:
       - "50051:50051"
       - "2112:2112"
@@ -169,7 +171,9 @@ services:
   outbox-relayer:
     image: resilientbank:dev
     container_name: rb-outbox-relayer
-    command: ["/usr/local/bin/outbox-relayer"]
+    # Same explicit entrypoint: without it this container would run the payments-api
+    # binary and never publish anything to Kafka.
+    entrypoint: ["/usr/local/bin/outbox-relayer"]
     ports:
       - "2113:2112"
     environment:
@@ -187,7 +191,9 @@ services:
   dashboard:
     image: resilientbank:dev
     container_name: rb-dashboard
-    command: ["/usr/local/bin/dashboard"]
+    # Same explicit entrypoint: without it this container would run the
+    # payments-api binary instead of serving the status page on :2114.
+    entrypoint: ["/usr/local/bin/dashboard"]
     ports:
       - "2114:2114"
     environment:
