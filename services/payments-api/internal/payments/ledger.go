@@ -128,7 +128,7 @@ func applyTransfer(ctx context.Context, tx pgx.Tx, region, paymentID string, fro
 		VALUES ($1, $2, $3, 'DEBIT', $4, $5, $6, $7),
 		       ($8, $2, $9, 'CREDIT', $4, $5, $6, $7)`,
 		debitID, paymentID, fromID, amountCents, currency, region, at,
-		creditID, toID, amountCents, currency, region, at,
+		creditID, toID,
 	); err != nil {
 		return fmt.Errorf("write ledger pair: %w", err)
 	}
