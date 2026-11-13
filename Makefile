@@ -1,9 +1,12 @@
 .PHONY: help tools verify up up-all up-fresh down reset migrate migrate-down migrate-status dev-up logs topics proto build run relayer dashboard test integration smoke tf-init tf-plan tf-apply tf-destroy argocd-bootstrap image-build image-load k8s-up tlc
 
-# On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which may be absent
-# or broken even when Git for Windows is installed. Override to point at Git Bash:
-#   make verify BASH="C:/Program Files/Git/bin/bash.exe"
-BASH ?= bash
+# On Windows, `bash` resolves to C:\Windows\system32\bash.exe (WSL), which fails if no distro is installed.
+# We auto-detect Git Bash if present, otherwise fallback to bash.
+ifeq ($(OS),Windows_NT)
+  BASH ?= "C:/Program Files/Git/bin/bash.exe"
+else
+  BASH ?= bash
+endif
 
 COMPOSE := docker compose -f deploy/local/docker-compose.yml
 
