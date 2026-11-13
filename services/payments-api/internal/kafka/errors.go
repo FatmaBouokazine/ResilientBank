@@ -7,6 +7,7 @@ import (
 	"net"
 
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // ErrPublishTimeout is returned when the broker did not acknowledge a message within the
@@ -72,6 +73,14 @@ func IsRetriable(err error) bool {
 
 	// Policy overrides, applied before the library default.
 	switch {
+	case errors.Is(err, kgo.ErrRecordTimeout):
+		// The broker never acknowledged the record within the delivery timeout: it was
+		// unreachable or stalled, not rejected. No acknowledgement means the message may
+		// not be durable, so retrying is both safe and required. Dead-lettering here would
+		// turn a broker outage into lost payment events, which is the exact failure the
+		// outbox exists to prevent.
+		return true
+
 	case errors.Is(err, kerr.MessageTooLarge):
 		// The payload will never fit. Retrying it forever would stall the outbox.
 		return false

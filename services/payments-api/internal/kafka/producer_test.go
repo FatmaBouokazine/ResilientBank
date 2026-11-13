@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/twmb/franz-go/pkg/kerr"
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 // The retriable/terminal split decides whether an event is retried or dead-lettered. A
@@ -35,6 +36,10 @@ func TestIsRetriableForTransientBrokerConditions(t *testing.T) {
 
 		// Overridden below: quota rejections are the canonical reason to back off.
 		"throttled by quota": kerr.ThrottlingQuotaExceeded,
+
+		// A broker outage surfaces as a delivery timeout, not a broker error code. The
+		// record was never acknowledged, so it must be retried rather than dead-lettered.
+		"record delivery timeout": kgo.ErrRecordTimeout,
 	}
 
 	for name, err := range transient {
